@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: fairway-four
+    runtime: docker
+    plan: starter
+    region: oregon
+    healthCheckPath: /api/health
+    numInstances: 1
+    envVars:
+      - key: FAIRWAY_FOUR_DB_PATH
+        value: /data/fairway-four.sqlite
+    disk:
+      name: fairway-four-data
+      mountPath: /data
+      sizeGB: 1
