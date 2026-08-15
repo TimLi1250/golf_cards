@@ -1,0 +1,11 @@
+services:
+  fairway-four:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "80:3000"
+    environment:
+      FAIRWAY_FOUR_DB_PATH: /data/fairway-four.sqlite
+      PORT: "3000"
+    volumes:
+      - ./data:/data
