@@ -20,10 +20,40 @@ export async function POST(request: NextRequest, context: RouteContext) {
   try {
     const { inviteCode } = await context.params;
     const body = await request.json();
-    const room = persistentRoomRegistry().join(inviteCode, { playerId: body.playerId, playerName: body.playerName });
+    const room = persistentRoomRegistry().join(inviteCode, { playerId: body.playerId, playerName: body.playerName, accessCode: body.accessCode });
     publishLobbyUpdate();
     publishRoomUpdate(inviteCode);
     return NextResponse.json({ room });
+  } catch (error) {
+    return roomErrorResponse(error, 400);
+  }
+}
+
+export async function DELETE(request: NextRequest, context: RouteContext) {
+  try {
+    const { inviteCode } = await context.params;
+    const playerId = request.nextUrl.searchParams.get("playerId") || "";
+    const removed = persistentRoomRegistry().closeHostedRoom(inviteCode, playerId);
+    if (removed) {
+      publishLobbyUpdate();
+      publishRoomUpdate(inviteCode);
+    }
+    return NextResponse.json({ removed });
+  } catch (error) {
+    return roomErrorResponse(error, 400);
+  }
+}
+
+export async function PATCH(request: NextRequest, context: RouteContext) {
+  try {
+    const { inviteCode } = await context.params;
+    const body = await request.json() as { playerId?: string };
+    const result = persistentRoomRegistry().leave(inviteCode, body.playerId || "");
+    if (result.left) {
+      publishLobbyUpdate();
+      publishRoomUpdate(inviteCode);
+    }
+    return NextResponse.json(result);
   } catch (error) {
     return roomErrorResponse(error, 400);
   }

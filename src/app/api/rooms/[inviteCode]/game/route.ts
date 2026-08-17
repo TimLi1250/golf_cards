@@ -37,6 +37,6 @@ export async function POST(request: NextRequest, context: RouteContext) {
 
 function gameErrorResponse(error: unknown, status: number) {
   console.error("Game route failed:", error);
-  const message = error instanceof RoomError ? error.message : "Unable to update this game right now.";
+  const message = error instanceof RoomError || error instanceof Error ? error.message : "Unable to update this game right now.";
   return NextResponse.json({ error: message }, { status });
 }

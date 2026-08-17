@@ -11,7 +11,9 @@ export type Room = {
   inviteCode: string;
   name: string;
   host: string;
+  hostPlayerId: string;
   playerLimit: number;
+  isPrivate: boolean;
   players: RoomPlayer[];
   status: "lobby" | "playing" | "finished";
   createdAt: string;
@@ -24,7 +26,7 @@ export class RoomError extends Error {}
 export class RoomRegistry {
   private readonly rooms = new Map<string, Room>();
 
-  create(input: { host: string; hostId: string; name?: string; playerLimit: number }): Room {
+  create(input: { host: string; hostId: string; name?: string; playerLimit: number; isPrivate?: boolean }): Room {
     const host = cleanText(input.host, "Guest player", 24);
     const hostId = cleanText(input.hostId, "", 100);
     const name = cleanText(input.name, "Friday Scramble", 30);
@@ -38,7 +40,9 @@ export class RoomRegistry {
       inviteCode: this.nextInviteCode(),
       name,
       host,
+      hostPlayerId: hostId,
       playerLimit: input.playerLimit,
+      isPrivate: Boolean(input.isPrivate),
       players: [{ id: hostId, name: host, joinedAt: new Date().toISOString() }],
       status: "lobby",
       createdAt: new Date().toISOString(),
@@ -58,9 +62,10 @@ export class RoomRegistry {
     return copyRoom(this.requireRoom(inviteCode));
   }
 
-  join(inviteCode: string, input: { playerId: string; playerName: string }): PublicRoom {
+  join(inviteCode: string, input: { playerId: string; playerName: string; accessCode?: string }): PublicRoom {
     const room = this.requireRoom(inviteCode);
     if (room.status !== "lobby") throw new RoomError("This game is no longer accepting players.");
+    if (room.isPrivate && input.accessCode?.trim().toUpperCase() !== room.inviteCode) throw new RoomError("Enter the correct invite code to join this private table.");
     const playerId = cleanText(input.playerId, "", 100);
     const playerName = cleanText(input.playerName, "Guest player", 24);
     if (!playerId) throw new RoomError("A player session is required to join a game.");

@@ -1,7 +1,8 @@
 import { createServer } from "node:http";
 import next from "next";
 import { Server } from "socket.io";
-import { roomEvents } from "./src/lib/realtime/room-events";
+import { publishLobbyUpdate, publishRoomUpdate, roomEvents } from "./src/lib/realtime/room-events";
+import { persistentRoomRegistry } from "./src/lib/rooms/sqlite-registry";
 
 async function bootstrap() {
   const development = process.env.NODE_ENV !== "production";
@@ -14,17 +15,28 @@ async function bootstrap() {
   const io = new Server(httpServer, { path: "/socket.io" });
 
   io.on("connection", (socket) => {
-    socket.on("identify", (playerId: string) => { socket.data.playerId = playerId; });
-    socket.on("watch:lobby", () => socket.join("lobby"));
+    socket.on("identify", (identity: PlayerIdentity | string) => {
+      const player = normalizePlayer(identity);
+      socket.data.playerId = player.id;
+      socket.data.playerName = player.name;
+      persistentRoomRegistry().upsertPlayer(player.id, player.name);
+      broadcastLobbyPresence(io);
+    });
+    socket.on("watch:lobby", () => {
+      socket.join("lobby");
+      broadcastLobbyPresence(io);
+    });
     socket.on("watch:room", (inviteCode: string) => {
       const room = `room:${inviteCode.toUpperCase()}`;
       socket.join(room);
       broadcastPresence(io, room);
+      broadcastLobbyPresence(io);
     });
     socket.on("disconnecting", () => {
       for (const room of socket.rooms) {
         if (room.startsWith("room:")) broadcastPresence(io, room, socket.id);
       }
+      broadcastLobbyPresence(io, socket.id);
     });
   });
 
@@ -32,12 +44,58 @@ async function bootstrap() {
   roomEvents.on("room:update", (inviteCode: string) => io.to(`room:${inviteCode}`).emit("room:update"));
   roomEvents.on("presence:update", (inviteCode: string, playerIds: string[]) => io.to(`room:${inviteCode}`).emit("presence:update", playerIds));
 
+  const emptyTableSweep = setInterval(() => {
+    const registry = persistentRoomRegistry();
+    const removedInviteCodes = registry.inviteCodes().filter((inviteCode) => !io.sockets.adapter.rooms.get(`room:${inviteCode}`)?.size)
+      .filter((inviteCode) => registry.removeRoom(inviteCode));
+    if (removedInviteCodes.length === 0) return;
+    publishLobbyUpdate();
+    for (const inviteCode of removedInviteCodes) publishRoomUpdate(inviteCode);
+  }, 60_000);
+  emptyTableSweep.unref();
+
   httpServer.listen(port, () => {
     console.log(`> Ready on http://localhost:${port}`);
   });
 }
 
 void bootstrap();
+
+type PlayerIdentity = {
+  playerId: string;
+  name?: string;
+};
+
+type LobbyPresence = {
+  id: string;
+  name: string;
+  status: "clubhouse" | "game";
+};
+
+function normalizePlayer(identity: PlayerIdentity | string): { id: string; name: string } {
+  const playerId = (typeof identity === "string" ? identity : identity?.playerId || "").trim().slice(0, 100);
+  const name = (typeof identity === "string" ? "Guest" : identity?.name || "Guest").trim().replace(/\s+/g, " ").slice(0, 24) || "Guest";
+  return { id: playerId, name };
+}
+
+function broadcastLobbyPresence(io: Server, excludedSocketId?: string) {
+  const registry = persistentRoomRegistry();
+  const playersInOpenTables = registry.playersInOpenTables();
+  const players = new Map<string, LobbyPresence>(registry.knownPlayers().map((player) => [player.id, { ...player, status: playersInOpenTables.has(player.id) ? "game" as const : "clubhouse" as const }]));
+  for (const socket of io.sockets.sockets.values()) {
+    if (socket.id === excludedSocketId || typeof socket.data.playerId !== "string" || !socket.data.playerId) continue;
+    const inGame = [...socket.rooms].some((room) => room.startsWith("room:"));
+    const current = players.get(socket.data.playerId);
+    if (!current || inGame) {
+      players.set(socket.data.playerId, {
+        id: socket.data.playerId,
+        name: typeof socket.data.playerName === "string" && socket.data.playerName ? socket.data.playerName : "Guest",
+        status: inGame ? "game" : "clubhouse",
+      });
+    }
+  }
+  io.to("lobby").emit("lobby:presence", [...players.values()].sort((first, second) => first.name.localeCompare(second.name)));
+}
 
 function broadcastPresence(io: Server, room: string, excludedSocketId?: string) {
   const playerIds = [...io.sockets.sockets.values()]

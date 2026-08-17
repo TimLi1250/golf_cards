@@ -36,6 +36,15 @@ export type MatchState = {
   hole: HoleState;
   holesToPlay: number;
   status: "playing" | "finished";
+  lastEvent?: MatchEvent;
+};
+
+export type MatchEvent = {
+  id: string;
+  message: string;
+  playerId?: string;
+  type?: "start" | "peek" | "draw-stock" | "take-discard" | "replace" | "discard-drawn" | "knock" | "next-hole" | "leave";
+  layoutIndex?: number;
 };
 
 const ranks: Rank[] = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"];
@@ -184,6 +193,7 @@ export function discardDrawnStockCard(match: MatchState, playerId: string): void
 export function knock(match: MatchState, playerId: string): void {
   assertPlaying(match);
   assertTurn(match, playerId);
+  assertInitialPeekComplete(match);
   if (match.hole.heldCard) throw new GolfRuleError("Finish the current draw before knocking.");
   const finalTurnQueue = turnOrderAfter(match.players, match.hole.currentPlayerIndex);
   match.hole.knockerId = playerId;
@@ -213,6 +223,62 @@ export function startNextHole(match: MatchState, random?: () => number): void {
     (match.hole.dealerIndex + 1) % match.players.length,
     random,
   );
+}
+
+/** Removes a player from an active match while keeping the current hole valid. */
+export function removePlayer(match: MatchState, playerId: string): { remainingPlayers: number; finished: boolean } {
+  const leavingIndex = match.players.findIndex((player) => player.id === playerId);
+  if (leavingIndex === -1) throw new GolfRuleError("Unknown player.");
+
+  const { hole } = match;
+  const currentPlayerId = match.players[hole.currentPlayerIndex]?.id;
+  if (hole.heldCard && currentPlayerId === playerId) {
+    hole.discard.push(hole.heldCard.card);
+    hole.heldCard = undefined;
+  }
+
+  match.players.splice(leavingIndex, 1);
+  delete hole.layouts[playerId];
+  if (hole.scores) delete hole.scores[playerId];
+  hole.peekedPlayerIds = hole.peekedPlayerIds.filter((id) => id !== playerId);
+  if (hole.knockerId === playerId) hole.knockerId = undefined;
+  if (hole.finalTurnQueue) hole.finalTurnQueue = hole.finalTurnQueue.filter((id) => id !== playerId);
+
+  if (match.players.length < 2) {
+    match.status = "finished";
+    return { remainingPlayers: match.players.length, finished: true };
+  }
+
+  if (leavingIndex < hole.dealerIndex) hole.dealerIndex -= 1;
+  else if (leavingIndex === hole.dealerIndex) hole.dealerIndex %= match.players.length;
+
+  const idMap = new Map<string, string>();
+  match.players = match.players.map((player, index) => {
+    const nextId = `player-${index + 1}`;
+    idMap.set(player.id, nextId);
+    return { ...player, id: nextId };
+  });
+  hole.layouts = Object.fromEntries(Object.entries(hole.layouts).map(([id, layout]) => [idMap.get(id) ?? id, layout]));
+  hole.peekedPlayerIds = hole.peekedPlayerIds.map((id) => idMap.get(id) ?? id);
+  if (hole.knockerId) hole.knockerId = idMap.get(hole.knockerId);
+  if (hole.finalTurnQueue) hole.finalTurnQueue = hole.finalTurnQueue.map((id) => idMap.get(id) ?? id);
+  if (hole.scores) hole.scores = Object.fromEntries(Object.entries(hole.scores).map(([id, score]) => [idMap.get(id) ?? id, score]));
+
+  if (hole.status === "playing") {
+    if (hole.finalTurnQueue) {
+      if (hole.finalTurnQueue.length === 0) {
+        scoreHole(match);
+      } else {
+        hole.currentPlayerIndex = match.players.findIndex((player) => player.id === hole.finalTurnQueue?.[0]);
+      }
+    } else if (leavingIndex < hole.currentPlayerIndex) {
+      hole.currentPlayerIndex -= 1;
+    } else if (leavingIndex === hole.currentPlayerIndex) {
+      hole.currentPlayerIndex %= match.players.length;
+    }
+  }
+
+  return { remainingPlayers: match.players.length, finished: match.status === "finished" };
 }
 
 function endTurn(match: MatchState, playerId: string): void {
@@ -252,5 +318,12 @@ function assertTurn(match: MatchState, playerId: string): void {
 function assertCanDraw(match: MatchState, playerId: string): void {
   assertPlaying(match);
   assertTurn(match, playerId);
+  assertInitialPeekComplete(match);
   if (match.hole.heldCard) throw new GolfRuleError("Resolve the drawn card before drawing again.");
+}
+
+function assertInitialPeekComplete(match: MatchState): void {
+  if (match.hole.peekedPlayerIds.length < match.players.length) {
+    throw new GolfRuleError("Everyone must peek at their cards before the first turn begins.");
+  }
 }

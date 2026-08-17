@@ -17,6 +17,8 @@ export async function POST(request: NextRequest) {
       hostId: body.hostId,
       name: body.name,
       playerLimit: body.playerLimit,
+      isPrivate: body.isPrivate,
+      inviteCode: body.inviteCode,
     });
     publishLobbyUpdate();
     return NextResponse.json({ room }, { status: 201 });

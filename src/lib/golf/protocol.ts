@@ -17,6 +17,7 @@ export type GameView = {
     name: string;
     status: "lobby" | "playing" | "finished";
     playerLimit: number;
+    isPrivate: boolean;
     players: { id: string; name: string }[];
   };
   canStart: boolean;
@@ -29,10 +30,19 @@ export type GameView = {
     stockCount: number;
     discard: PublicCard;
     heldCard?: PublicCard;
+    isPeeking: boolean;
+    peekedPlayers: number;
     canPeek: boolean;
     canAct: boolean;
     heldCardSource?: "stock" | "discard";
     knockerName?: string;
+    lastEvent?: {
+      id: string;
+      message: string;
+      playerId?: string;
+      type?: "start" | "peek" | "draw-stock" | "take-discard" | "replace" | "discard-drawn" | "knock" | "next-hole" | "leave";
+      layoutIndex?: number;
+    };
     players: TablePlayerView[];
   };
 };
