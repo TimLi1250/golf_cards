@@ -58,20 +58,25 @@ export default function Home() {
   async function hostGame(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const host = name.trim() || "Guest";
-    const response = await fetch("/api/rooms", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ host, hostId: playerSessionId(), name: gameName, playerLimit }),
-    });
-    const data = await response.json() as { room?: HostedGame; error?: string };
-    if (!response.ok || !data.room) {
-      setNotice(data.error || "Unable to create a table.");
-      return;
+    try {
+      const response = await fetch("/api/rooms", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ host, hostId: playerSessionId(), name: gameName, playerLimit }),
+      });
+      const data = await readRoomResponse(response);
+      const room = data.room;
+      if (!response.ok || !room) {
+        setNotice(data.error || "Unable to create a table.");
+        return;
+      }
+      setGames((currentGames) => [room, ...currentGames]);
+      setNotice(`${room.name} is ready. Invite code: ${room.inviteCode}.`);
+      setDialog(null);
+      setName(host);
+    } catch {
+      setNotice("Unable to reach the table server. Please try again.");
     }
-    setGames((currentGames) => [data.room!, ...currentGames]);
-    setNotice(`${data.room.name} is ready. Invite code: ${data.room.inviteCode}.`);
-    setDialog(null);
-    setName(host);
   }
 
   async function joinGame(event: FormEvent<HTMLFormElement>) {
@@ -83,18 +88,23 @@ export default function Home() {
     }
     const code = joinCode.toUpperCase();
     const playerName = name.trim() || "Guest player";
-    const response = await fetch(`/api/rooms/${code}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ playerId: playerSessionId(), playerName }),
-    });
-    const data = await response.json() as { room?: HostedGame; error?: string };
-    if (!response.ok || !data.room) {
-      setNotice(data.error || "Unable to join this table.");
-    } else {
-      setGames((currentGames) => currentGames.map((game) => game.id === data.room!.id ? data.room! : game));
-      setName(playerName);
-      setNotice(`You joined ${data.room.name}.`);
+    try {
+      const response = await fetch(`/api/rooms/${code}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ playerId: playerSessionId(), playerName }),
+      });
+      const data = await readRoomResponse(response);
+      const room = data.room;
+      if (!response.ok || !room) {
+        setNotice(data.error || "Unable to join this table.");
+      } else {
+        setGames((currentGames) => currentGames.map((game) => game.id === room.id ? room : game));
+        setName(playerName);
+        setNotice(`You joined ${room.name}.`);
+      }
+    } catch {
+      setNotice("Unable to reach the table server. Please try again.");
     }
     setDialog(null);
   }
@@ -148,7 +158,28 @@ function playerSessionId(): string {
   const storageKey = "fairway-four-player-id";
   const savedId = window.localStorage.getItem(storageKey);
   if (savedId) return savedId;
-  const playerId = crypto.randomUUID();
+  const playerId = createPlayerId();
   window.localStorage.setItem(storageKey, playerId);
   return playerId;
+}
+
+async function readRoomResponse(response: Response): Promise<{ room?: HostedGame; error?: string }> {
+  try {
+    return await response.json() as { room?: HostedGame; error?: string };
+  } catch {
+    return {};
+  }
+}
+
+function createPlayerId(): string {
+  try {
+    if (typeof globalThis.crypto?.randomUUID === "function") return globalThis.crypto.randomUUID();
+    if (typeof globalThis.crypto?.getRandomValues === "function") {
+      const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16));
+      return `player-${Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+    }
+  } catch {
+    // Public HTTP pages can expose Web Crypto without permitting randomUUID().
+  }
+  return `player-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
