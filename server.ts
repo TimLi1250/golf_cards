@@ -79,20 +79,17 @@ function normalizePlayer(identity: PlayerIdentity | string): { id: string; name:
 }
 
 function broadcastLobbyPresence(io: Server, excludedSocketId?: string) {
-  const registry = persistentRoomRegistry();
-  const playersInOpenTables = registry.playersInOpenTables();
-  const players = new Map<string, LobbyPresence>(registry.knownPlayers().map((player) => [player.id, { ...player, status: playersInOpenTables.has(player.id) ? "game" as const : "clubhouse" as const }]));
+  const playersInOpenTables = persistentRoomRegistry().playersInOpenTables();
+  const players = new Map<string, LobbyPresence>();
   for (const socket of io.sockets.sockets.values()) {
     if (socket.id === excludedSocketId || typeof socket.data.playerId !== "string" || !socket.data.playerId) continue;
-    const inGame = [...socket.rooms].some((room) => room.startsWith("room:"));
+    const inGame = playersInOpenTables.has(socket.data.playerId);
     const current = players.get(socket.data.playerId);
-    if (!current || inGame) {
-      players.set(socket.data.playerId, {
-        id: socket.data.playerId,
-        name: typeof socket.data.playerName === "string" && socket.data.playerName ? socket.data.playerName : "Guest",
-        status: inGame ? "game" : "clubhouse",
-      });
-    }
+    players.set(socket.data.playerId, {
+      id: socket.data.playerId,
+      name: typeof socket.data.playerName === "string" && socket.data.playerName ? socket.data.playerName : current?.name || "Guest",
+      status: inGame || current?.status === "game" ? "game" : "clubhouse",
+    });
   }
   io.to("lobby").emit("lobby:presence", [...players.values()].sort((first, second) => first.name.localeCompare(second.name)));
 }

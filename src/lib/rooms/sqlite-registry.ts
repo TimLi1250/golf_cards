@@ -6,14 +6,18 @@ import {
   discardDrawnStockCard,
   drawFromStock,
   knock,
+  matchDiscard,
   peekInitialCards,
   replaceLayoutCard,
   removePlayer,
+  skipPower,
   startNextHole,
   takeDiscard,
+  resolvePeekPower,
+  resolveSwapPower,
   createMatch,
 } from "../golf/engine";
-import type { Card, MatchState } from "../golf/engine";
+import type { Card, LayoutCardReference, MatchEvent, MatchState } from "../golf/engine";
 import type { GameAction, GameView, PublicCard } from "../golf/protocol";
 import { PublicRoom, Room, RoomError, RoomPlayer } from "./registry";
 
@@ -237,13 +241,15 @@ export class SqliteRoomRegistry {
     if (!storedGame) return { room: roomView, canStart };
 
     const match = JSON.parse(storedGame.game_state) as MatchState;
-    const revealed = match.hole.status === "scored";
+    const revealed = match.hole.status === "scored" || match.status === "finished";
     const viewerEngineId = viewerIndex === -1 ? undefined : `player-${viewerIndex + 1}`;
     const currentEnginePlayer = match.players[match.hole.currentPlayerIndex];
     const currentIndex = currentEnginePlayer ? match.players.findIndex((player) => player.id === currentEnginePlayer.id) : -1;
     const currentRoomPlayer = players[currentIndex];
-    const isPeeking = match.hole.status === "playing" && match.hole.peekedPlayerIds.length < match.players.length;
-    const viewerCanAct = !isPeeking && match.hole.status === "playing" && currentEnginePlayer?.id === viewerEngineId;
+    const isPeeking = match.status === "playing" && match.hole.status === "playing" && match.hole.peekedPlayerIds.length < match.players.length;
+    const viewerCanAct = match.status === "playing" && !isPeeking && match.hole.status === "playing" && currentEnginePlayer?.id === viewerEngineId;
+    const pendingPower = match.hole.pendingPower;
+    const pendingPowerIndex = pendingPower ? match.players.findIndex((player) => player.id === pendingPower.playerId) : -1;
     const viewPlayers = players.map((player, index) => {
       const enginePlayerId = `player-${index + 1}`;
       const layout = match.hole.layouts[enginePlayerId] ?? [];
@@ -253,6 +259,7 @@ export class SqliteRoomRegistry {
         isYou: player.id === playerId,
         cardCount: layout.length,
         cards: layout.map((card) => (revealed ? publicCard(card) : null)),
+        totalScore: match.players[index]?.totalScore || 0,
         score: revealed ? match.hole.scores?.[enginePlayerId] : undefined,
       };
     });
@@ -267,6 +274,7 @@ export class SqliteRoomRegistry {
         holeNumber: match.hole.number,
         holesToPlay: match.holesToPlay,
         phase,
+        lostPlayerName: match.lostPlayerId ? match.players.find((player) => player.id === match.lostPlayerId)?.name : undefined,
         currentPlayerId: currentRoomPlayer?.id,
         currentPlayerName: currentRoomPlayer?.name,
         stockCount: match.hole.stock.length,
@@ -275,8 +283,15 @@ export class SqliteRoomRegistry {
         isPeeking,
         peekedPlayers: match.hole.peekedPlayerIds.length,
         heldCardSource: viewerCanAct ? match.hole.heldCard?.source : undefined,
-        canPeek: match.hole.status === "playing" && viewerEngineId ? !match.hole.peekedPlayerIds.includes(viewerEngineId) : false,
+        canPeek: match.status === "playing" && match.hole.status === "playing" && viewerEngineId ? !match.hole.peekedPlayerIds.includes(viewerEngineId) : false,
         canAct: viewerCanAct,
+        pendingPower: pendingPower && pendingPowerIndex >= 0 ? {
+          rank: pendingPower.rank,
+          playerId: players[pendingPowerIndex]?.id || "",
+          playerName: match.players[pendingPowerIndex]?.name || "A player",
+        } : undefined,
+        canUsePower: viewerCanAct && pendingPower?.playerId === viewerEngineId,
+        canMatch: match.status === "playing" && !isPeeking && match.hole.status === "playing" && !match.hole.heldCard && !pendingPower && Boolean(viewerEngineId && match.hole.layouts[viewerEngineId]?.length),
         knockerName: match.hole.knockerId ? match.players.find((player) => player.id === match.hole.knockerId)?.name : undefined,
         lastEvent: match.lastEvent,
         players: viewPlayers,
@@ -284,7 +299,7 @@ export class SqliteRoomRegistry {
     };
   }
 
-  act(inviteCode: string, roomPlayerId: string, action: Exclude<GameAction, { type: "start" }>): { view: GameView; privatePeek?: PublicCard[] } {
+  act(inviteCode: string, roomPlayerId: string, action: Exclude<GameAction, { type: "start" }>): { view: GameView; privatePeek?: PublicCard[]; privatePowerPeek?: { playerId: string; layoutIndex: number; card: PublicCard } } {
     const room = this.requireRoom(inviteCode);
     if (room.status !== "playing") throw new RoomError("This game has not started.");
     const players = this.playersFor(room.id);
@@ -295,6 +310,15 @@ export class SqliteRoomRegistry {
     if (!storedGame) throw new RoomError("Game state could not be found.");
     const match = JSON.parse(storedGame.game_state) as MatchState;
     let privatePeek: PublicCard[] | undefined;
+    let privatePowerPeek: { playerId: string; layoutIndex: number; card: PublicCard } | undefined;
+    let eventType: NonNullable<MatchEvent["type"]> = action.type === "use-swap-power" || action.type === "use-peek-power" ? "power-peek" : action.type;
+    let eventMessage: string | undefined;
+    let affectedCards: { playerId: string; layoutIndex: number }[] | undefined;
+    const engineReference = (roomId: string, layoutIndex: number): LayoutCardReference => {
+      const index = players.findIndex((player) => player.id === roomId);
+      if (index === -1) throw new RoomError("Choose a player who is still at this table.");
+      return { playerId: `player-${index + 1}`, layoutIndex };
+    };
 
     switch (action.type) {
       case "peek": privatePeek = peekInitialCards(match, enginePlayerId).map(publicCard); break;
@@ -302,6 +326,44 @@ export class SqliteRoomRegistry {
       case "take-discard": takeDiscard(match, enginePlayerId); break;
       case "replace": replaceLayoutCard(match, enginePlayerId, action.layoutIndex); break;
       case "discard-drawn": discardDrawnStockCard(match, enginePlayerId); break;
+      case "use-swap-power": {
+        const first = action.first ? engineReference(action.first.playerId, action.first.layoutIndex) : undefined;
+        const second = action.second ? engineReference(action.second.playerId, action.second.layoutIndex) : undefined;
+        resolveSwapPower(match, enginePlayerId, first, second);
+        eventType = "power-swap";
+        eventMessage = first && second ? `${players[playerIndex]?.name || "A player"} swapped two cards with an 8.` : `${players[playerIndex]?.name || "A player"} kept the table as it was.`;
+        affectedCards = [action.first, action.second].filter((card): card is { playerId: string; layoutIndex: number } => Boolean(card));
+        break;
+      }
+      case "use-peek-power": {
+        const target = engineReference(action.targetPlayerId, action.layoutIndex);
+        const card = resolvePeekPower(match, enginePlayerId, target);
+        eventType = "power-peek";
+        eventMessage = `${players[playerIndex]?.name || "A player"} used a ${match.hole.discard.at(-1)?.rank || "power"} to inspect a card.`;
+        affectedCards = [{ playerId: action.targetPlayerId, layoutIndex: action.layoutIndex }];
+        privatePowerPeek = { playerId: action.targetPlayerId, layoutIndex: action.layoutIndex, card: publicCard(card) };
+        break;
+      }
+      case "skip-power":
+        skipPower(match, enginePlayerId);
+        eventType = "skip-power";
+        eventMessage = `${players[playerIndex]?.name || "A player"} skipped the power card.`;
+        break;
+      case "match-own": {
+        const result = matchDiscard(match, enginePlayerId, { playerId: enginePlayerId, layoutIndex: action.layoutIndex });
+        eventType = "match-own";
+        eventMessage = result.correct ? `${players[playerIndex]?.name || "A player"} matched the discard and lost a card.` : `${players[playerIndex]?.name || "A player"} called a wrong match and lost the game.`;
+        affectedCards = [{ playerId: roomPlayerId, layoutIndex: action.layoutIndex }];
+        break;
+      }
+      case "match-other": {
+        const result = matchDiscard(match, enginePlayerId, engineReference(action.targetPlayerId, action.targetLayoutIndex), { playerId: enginePlayerId, layoutIndex: action.giftLayoutIndex });
+        eventType = "match-other";
+        const targetName = players.find((player) => player.id === action.targetPlayerId)?.name || "another player";
+        eventMessage = result.correct ? `${players[playerIndex]?.name || "A player"} matched ${targetName}'s card and handed one over.` : `${players[playerIndex]?.name || "A player"} called ${targetName}'s card wrong and lost the game.`;
+        affectedCards = [{ playerId: action.targetPlayerId, layoutIndex: action.targetLayoutIndex }, { playerId: roomPlayerId, layoutIndex: action.giftLayoutIndex }];
+        break;
+      }
       case "knock": knock(match, enginePlayerId); break;
       case "next-hole": startNextHole(match); break;
     }
@@ -309,10 +371,10 @@ export class SqliteRoomRegistry {
     const everyonePeeked = action.type === "peek" && match.hole.peekedPlayerIds.length === match.players.length;
     const message = everyonePeeked
       ? `Everyone has peeked. ${match.players[match.hole.currentPlayerIndex]?.name || "The next player"} starts.`
-      : actionMessage(playerName, action);
-    match.lastEvent = { id: eventId(), message, playerId: roomPlayerId, type: action.type, layoutIndex: action.type === "replace" ? action.layoutIndex : undefined };
+      : eventMessage || actionMessage(playerName, action);
+    match.lastEvent = { id: eventId(), message, playerId: roomPlayerId, type: eventType, layoutIndex: action.type === "replace" ? action.layoutIndex : undefined, affectedCards };
     this.saveMatch(room.id, match);
-    return { view: this.gameView(inviteCode, roomPlayerId), privatePeek };
+    return { view: this.gameView(inviteCode, roomPlayerId), privatePeek, privatePowerPeek };
   }
 
   private migrate() {
@@ -421,6 +483,11 @@ function actionMessage(playerName: string, action: Exclude<GameAction, { type: "
     case "take-discard": return `${playerName} took the discard card.`;
     case "replace": return `${playerName} replaced a card.`;
     case "discard-drawn": return `${playerName} discarded the drawn card.`;
+    case "use-swap-power": return `${playerName} used an 8 power.`;
+    case "use-peek-power": return `${playerName} inspected a card.`;
+    case "skip-power": return `${playerName} skipped a power card.`;
+    case "match-own": return `${playerName} called a matching card.`;
+    case "match-other": return `${playerName} called another player's card.`;
     case "knock": return `${playerName} knocked — final turns begin.`;
     case "next-hole": return `${playerName} dealt the next hole.`;
   }
@@ -440,7 +507,7 @@ declare global {
 }
 
 export function persistentRoomRegistry(): SqliteRoomRegistry {
-  const registryVersion = 10;
+  const registryVersion = 12;
   if (globalThis.fairwayFourRoomRegistryVersion !== registryVersion || !globalThis.fairwayFourRoomRegistry) {
     const oldRegistry = globalThis.fairwayFourRoomRegistry as { close?: unknown } | undefined;
     if (typeof oldRegistry?.close === "function") oldRegistry.close();

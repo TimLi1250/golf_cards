@@ -1,5 +1,5 @@
-export type Suit = "clubs" | "diamonds" | "hearts" | "spades";
-export type Rank = "A" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "10" | "J" | "Q" | "K";
+export type Suit = "clubs" | "diamonds" | "hearts" | "spades" | "joker";
+export type Rank = "A" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "10" | "J" | "Q" | "K" | "JOKER";
 
 export type Card = {
   id: string;
@@ -14,6 +14,17 @@ export type Player = {
 };
 
 export type CardSource = "stock" | "discard";
+export type PowerRank = "8" | "J" | "Q";
+
+export type PendingPower = {
+  rank: PowerRank;
+  playerId: string;
+};
+
+export type LayoutCardReference = {
+  playerId: string;
+  layoutIndex: number;
+};
 
 export type HoleState = {
   number: number;
@@ -24,6 +35,7 @@ export type HoleState = {
   discard: Card[];
   currentPlayerIndex: number;
   heldCard?: { card: Card; source: CardSource };
+  pendingPower?: PendingPower;
   peekedPlayerIds: string[];
   knockerId?: string;
   finalTurnQueue?: string[];
@@ -36,6 +48,7 @@ export type MatchState = {
   hole: HoleState;
   holesToPlay: number;
   status: "playing" | "finished";
+  lostPlayerId?: string;
   lastEvent?: MatchEvent;
 };
 
@@ -43,12 +56,13 @@ export type MatchEvent = {
   id: string;
   message: string;
   playerId?: string;
-  type?: "start" | "peek" | "draw-stock" | "take-discard" | "replace" | "discard-drawn" | "knock" | "next-hole" | "leave";
+  type?: "start" | "peek" | "draw-stock" | "take-discard" | "replace" | "discard-drawn" | "knock" | "next-hole" | "leave" | "power-swap" | "power-peek" | "skip-power" | "match-own" | "match-other";
   layoutIndex?: number;
+  affectedCards?: { playerId: string; layoutIndex: number }[];
 };
 
-const ranks: Rank[] = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"];
-const suits: Suit[] = ["clubs", "diamonds", "hearts", "spades"];
+const ranks: Exclude<Rank, "JOKER">[] = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"];
+const suits: Exclude<Suit, "joker">[] = ["clubs", "diamonds", "hearts", "spades"];
 
 export class GolfRuleError extends Error {}
 
@@ -56,9 +70,11 @@ export function createDeck(deckCount = 1): Card[] {
   if (!Number.isInteger(deckCount) || deckCount < 1) {
     throw new GolfRuleError("At least one deck is required.");
   }
-  return Array.from({ length: deckCount }, (_, deckIndex) =>
-    suits.flatMap((suit) => ranks.map((rank) => ({ id: `${rank}-${suit}-${deckIndex + 1}`, rank, suit }))),
-  ).flat();
+  return Array.from({ length: deckCount }, (_, deckIndex) => [
+    ...suits.flatMap((suit) => ranks.map((rank) => ({ id: `${rank}-${suit}-${deckIndex + 1}`, rank, suit }))),
+    { id: `JOKER-red-${deckIndex + 1}`, rank: "JOKER" as const, suit: "joker" as const },
+    { id: `JOKER-black-${deckIndex + 1}`, rank: "JOKER" as const, suit: "joker" as const },
+  ]).flat();
 }
 
 export function shuffle<T>(items: T[], random: () => number = Math.random): T[] {
@@ -71,9 +87,11 @@ export function shuffle<T>(items: T[], random: () => number = Math.random): T[] 
 }
 
 export function scoreCard(card: Card): number {
-  if (card.rank === "K") return 0;
-  if (card.rank === "J" || card.rank === "Q") return 10;
+  if (card.rank === "JOKER") return -2;
   if (card.rank === "A") return 1;
+  if (card.rank === "J") return 11;
+  if (card.rank === "Q") return 12;
+  if (card.rank === "K") return 13;
   return Number(card.rank);
 }
 
@@ -174,7 +192,7 @@ export function replaceLayoutCard(match: MatchState, playerId: string, layoutInd
   layout[layoutIndex] = heldCard.card;
   match.hole.discard.push(replaced);
   match.hole.heldCard = undefined;
-  endTurn(match, playerId);
+  resolveDiscardPowerOrEndTurn(match, playerId, replaced);
 }
 
 export function discardDrawnStockCard(match: MatchState, playerId: string): void {
@@ -187,7 +205,86 @@ export function discardDrawnStockCard(match: MatchState, playerId: string): void
   }
   match.hole.discard.push(heldCard.card);
   match.hole.heldCard = undefined;
+  resolveDiscardPowerOrEndTurn(match, playerId, heldCard.card);
+}
+
+/** Uses an eight that was just discarded to swap two unknown layout cards. */
+export function resolveSwapPower(match: MatchState, playerId: string, first?: LayoutCardReference, second?: LayoutCardReference): void {
+  assertPendingPower(match, playerId, "8");
+  if ((first && !second) || (!first && second)) throw new GolfRuleError("Choose two cards to swap, or skip the eight.");
+  if (first && second) {
+    assertLayoutReference(match, first);
+    assertLayoutReference(match, second);
+    if (first.playerId === second.playerId && first.layoutIndex === second.layoutIndex) {
+      throw new GolfRuleError("Choose two different cards to swap.");
+    }
+    const firstLayout = match.hole.layouts[first.playerId];
+    const secondLayout = match.hole.layouts[second.playerId];
+    [firstLayout[first.layoutIndex], secondLayout[second.layoutIndex]] = [secondLayout[second.layoutIndex], firstLayout[first.layoutIndex]];
+  }
+  match.hole.pendingPower = undefined;
   endTurn(match, playerId);
+}
+
+/** Uses a Jack or Queen to privately inspect an eligible layout card. */
+export function resolvePeekPower(match: MatchState, playerId: string, target: LayoutCardReference): Card {
+  const power = assertPendingPower(match, playerId);
+  if (power.rank !== "J" && power.rank !== "Q") throw new GolfRuleError("The eight swaps cards instead of looking at them.");
+  assertLayoutReference(match, target);
+  if (power.rank === "J" && target.playerId !== playerId) {
+    throw new GolfRuleError("A Jack can only look at one of your own cards.");
+  }
+  const card = match.hole.layouts[target.playerId][target.layoutIndex];
+  match.hole.pendingPower = undefined;
+  endTurn(match, playerId);
+  return card;
+}
+
+/** Declines the optional action from a just-discarded power card. */
+export function skipPower(match: MatchState, playerId: string): void {
+  assertPendingPower(match, playerId);
+  match.hole.pendingPower = undefined;
+  endTurn(match, playerId);
+}
+
+/**
+ * Plays a face-down layout card against the top discard without using a turn.
+ * A correct call removes the matching card. A wrong call immediately ends the
+ * match for the caller.
+ */
+export function matchDiscard(
+  match: MatchState,
+  playerId: string,
+  target: LayoutCardReference,
+  gift?: LayoutCardReference,
+): { correct: boolean; discarded?: Card } {
+  assertPlaying(match);
+  assertInitialPeekComplete(match);
+  assertPlayer(match, playerId);
+  if (match.hole.heldCard || match.hole.pendingPower) throw new GolfRuleError("Finish the current play before calling a match.");
+  assertLayoutReference(match, target);
+  const targetIsOwn = target.playerId === playerId;
+  if (!targetIsOwn) {
+    if (!gift || gift.playerId !== playerId) throw new GolfRuleError("Choose one of your own cards to give the other player.");
+    assertLayoutReference(match, gift);
+  }
+
+  const topDiscard = match.hole.discard.at(-1);
+  if (!topDiscard) throw new GolfRuleError("The discard pile is empty.");
+  const claimedCard = match.hole.layouts[target.playerId][target.layoutIndex];
+  if (claimedCard.rank !== topDiscard.rank) {
+    match.status = "finished";
+    match.lostPlayerId = playerId;
+    return { correct: false };
+  }
+
+  const matched = match.hole.layouts[target.playerId].splice(target.layoutIndex, 1)[0];
+  if (!targetIsOwn) {
+    const given = match.hole.layouts[playerId].splice(gift!.layoutIndex, 1)[0];
+    match.hole.layouts[target.playerId].push(given);
+  }
+  match.hole.discard.push(matched);
+  return { correct: true, discarded: matched };
 }
 
 export function knock(match: MatchState, playerId: string): void {
@@ -236,12 +333,14 @@ export function removePlayer(match: MatchState, playerId: string): { remainingPl
     hole.discard.push(hole.heldCard.card);
     hole.heldCard = undefined;
   }
+  const clearedPendingPower = hole.pendingPower?.playerId === playerId;
 
   match.players.splice(leavingIndex, 1);
   delete hole.layouts[playerId];
   if (hole.scores) delete hole.scores[playerId];
   hole.peekedPlayerIds = hole.peekedPlayerIds.filter((id) => id !== playerId);
   if (hole.knockerId === playerId) hole.knockerId = undefined;
+  if (clearedPendingPower) hole.pendingPower = undefined;
   if (hole.finalTurnQueue) hole.finalTurnQueue = hole.finalTurnQueue.filter((id) => id !== playerId);
 
   if (match.players.length < 2) {
@@ -261,6 +360,7 @@ export function removePlayer(match: MatchState, playerId: string): { remainingPl
   hole.layouts = Object.fromEntries(Object.entries(hole.layouts).map(([id, layout]) => [idMap.get(id) ?? id, layout]));
   hole.peekedPlayerIds = hole.peekedPlayerIds.map((id) => idMap.get(id) ?? id);
   if (hole.knockerId) hole.knockerId = idMap.get(hole.knockerId);
+  if (hole.pendingPower) hole.pendingPower.playerId = idMap.get(hole.pendingPower.playerId) ?? hole.pendingPower.playerId;
   if (hole.finalTurnQueue) hole.finalTurnQueue = hole.finalTurnQueue.map((id) => idMap.get(id) ?? id);
   if (hole.scores) hole.scores = Object.fromEntries(Object.entries(hole.scores).map(([id, score]) => [idMap.get(id) ?? id, score]));
 
@@ -320,10 +420,40 @@ function assertCanDraw(match: MatchState, playerId: string): void {
   assertTurn(match, playerId);
   assertInitialPeekComplete(match);
   if (match.hole.heldCard) throw new GolfRuleError("Resolve the drawn card before drawing again.");
+  if (match.hole.pendingPower) throw new GolfRuleError("Use or skip the power card before drawing again.");
 }
 
 function assertInitialPeekComplete(match: MatchState): void {
   if (match.hole.peekedPlayerIds.length < match.players.length) {
     throw new GolfRuleError("Everyone must peek at their cards before the first turn begins.");
+  }
+}
+
+function resolveDiscardPowerOrEndTurn(match: MatchState, playerId: string, discarded: Card): void {
+  if (isPowerCard(discarded)) {
+    match.hole.pendingPower = { rank: discarded.rank, playerId };
+    return;
+  }
+  endTurn(match, playerId);
+}
+
+function isPowerCard(card: Card): card is Card & { rank: PowerRank } {
+  return card.rank === "8" || card.rank === "J" || card.rank === "Q";
+}
+
+function assertPendingPower(match: MatchState, playerId: string, expectedRank?: PowerRank): PendingPower {
+  assertPlaying(match);
+  assertTurn(match, playerId);
+  const power = match.hole.pendingPower;
+  if (!power || power.playerId !== playerId) throw new GolfRuleError("There is no power card waiting for you.");
+  if (expectedRank && power.rank !== expectedRank) throw new GolfRuleError(`The ${power.rank} power must be resolved instead.`);
+  return power;
+}
+
+function assertLayoutReference(match: MatchState, reference: LayoutCardReference): void {
+  assertPlayer(match, reference.playerId);
+  const layout = match.hole.layouts[reference.playerId];
+  if (!Number.isInteger(reference.layoutIndex) || reference.layoutIndex < 0 || reference.layoutIndex >= layout.length) {
+    throw new GolfRuleError("Choose a card that is still on the table.");
   }
 }
