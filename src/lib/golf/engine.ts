@@ -21,6 +21,13 @@ export type PendingPower = {
   playerId: string;
 };
 
+export type PendingMatchGift = {
+  playerId: string;
+  targetPlayerId: string;
+  targetLayoutIndex: number;
+  matchedCard: Card;
+};
+
 export type LayoutCardReference = {
   playerId: string;
   layoutIndex: number;
@@ -36,6 +43,7 @@ export type HoleState = {
   currentPlayerIndex: number;
   heldCard?: { card: Card; source: CardSource };
   pendingPower?: PendingPower;
+  pendingMatchGift?: PendingMatchGift;
   peekedPlayerIds: string[];
   knockerId?: string;
   finalTurnQueue?: string[];
@@ -254,22 +262,13 @@ export function skipPower(match: MatchState, playerId: string): void {
  * A correct call removes the matching card. The registry removes a player who
  * makes a wrong call, allowing the remaining players to continue.
  */
-export function matchDiscard(
-  match: MatchState,
-  playerId: string,
-  target: LayoutCardReference,
-  gift?: LayoutCardReference,
-): { correct: boolean; discarded?: Card } {
+export function matchDiscard(match: MatchState, playerId: string, layoutIndex: number): { correct: boolean; discarded?: Card } {
   assertPlaying(match);
   assertInitialPeekComplete(match);
   assertActivePlayer(match, playerId);
-  if (match.hole.heldCard || match.hole.pendingPower) throw new GolfRuleError("Finish the current play before calling a match.");
+  assertMatchingAvailable(match);
+  const target = { playerId, layoutIndex };
   assertLayoutReference(match, target);
-  const targetIsOwn = target.playerId === playerId;
-  if (!targetIsOwn) {
-    if (!gift || gift.playerId !== playerId) throw new GolfRuleError("Choose one of your own cards to give the other player.");
-    assertLayoutReference(match, gift);
-  }
 
   const topDiscard = match.hole.discard.at(-1);
   if (!topDiscard) throw new GolfRuleError("The discard pile is empty.");
@@ -278,13 +277,41 @@ export function matchDiscard(
     return { correct: false };
   }
 
-  const matched = match.hole.layouts[target.playerId].splice(target.layoutIndex, 1)[0];
-  if (!targetIsOwn) {
-    const given = match.hole.layouts[playerId].splice(gift!.layoutIndex, 1)[0];
-    match.hole.layouts[target.playerId].push(given);
-  }
+  const matched = match.hole.layouts[playerId].splice(layoutIndex, 1)[0];
   match.hole.discard.push(matched);
   return { correct: true, discarded: matched };
+}
+
+/** Claims an opponent's matching card. A correct claim must be followed by a gift. */
+export function claimOpponentMatch(match: MatchState, playerId: string, target: LayoutCardReference): { correct: boolean } {
+  assertPlaying(match);
+  assertInitialPeekComplete(match);
+  assertActivePlayer(match, playerId);
+  assertMatchingAvailable(match);
+  assertLayoutReference(match, target);
+  if (target.playerId === playerId) throw new GolfRuleError("Choose another player's card for an opponent match.");
+  if (isEliminated(match, target.playerId)) throw new GolfRuleError("That player is already out of this hole.");
+  const topDiscard = match.hole.discard.at(-1);
+  if (!topDiscard) throw new GolfRuleError("The discard pile is empty.");
+  const claimedCard = match.hole.layouts[target.playerId][target.layoutIndex];
+  if (claimedCard.rank !== topDiscard.rank) return { correct: false };
+
+  const matchedCard = match.hole.layouts[target.playerId].splice(target.layoutIndex, 1)[0];
+  match.hole.pendingMatchGift = { playerId, targetPlayerId: target.playerId, targetLayoutIndex: target.layoutIndex, matchedCard };
+  return { correct: true };
+}
+
+/** Completes a correct opponent match by placing one of the caller's cards into the empty position. */
+export function giveMatchCard(match: MatchState, playerId: string, layoutIndex: number): void {
+  assertPlaying(match);
+  assertActivePlayer(match, playerId);
+  const pendingGift = match.hole.pendingMatchGift;
+  if (!pendingGift || pendingGift.playerId !== playerId) throw new GolfRuleError("There is no matching-card gift waiting for you.");
+  assertLayoutReference(match, { playerId, layoutIndex });
+  const given = match.hole.layouts[playerId].splice(layoutIndex, 1)[0];
+  match.hole.layouts[pendingGift.targetPlayerId].splice(pendingGift.targetLayoutIndex, 0, given);
+  match.hole.discard.push(pendingGift.matchedCard);
+  match.hole.pendingMatchGift = undefined;
 }
 
 export function knock(match: MatchState, playerId: string): void {
@@ -292,6 +319,7 @@ export function knock(match: MatchState, playerId: string): void {
   assertTurn(match, playerId);
   assertInitialPeekComplete(match);
   if (match.hole.heldCard) throw new GolfRuleError("Finish the current draw before knocking.");
+  if (match.hole.pendingMatchGift) throw new GolfRuleError("Finish the matching-card gift before knocking.");
   const finalTurnQueue = turnOrderAfter(match.players, match.hole.currentPlayerIndex)
     .filter((candidateId) => !isEliminated(match, candidateId));
   match.hole.knockerId = playerId;
@@ -381,6 +409,13 @@ export function removePlayer(match: MatchState, playerId: string): { remainingPl
     hole.discard.push(hole.heldCard.card);
     hole.heldCard = undefined;
   }
+  if (hole.pendingMatchGift?.playerId === playerId) {
+    const pendingGift = hole.pendingMatchGift;
+    hole.layouts[pendingGift.targetPlayerId].splice(pendingGift.targetLayoutIndex, 0, pendingGift.matchedCard);
+    hole.pendingMatchGift = undefined;
+  } else if (hole.pendingMatchGift?.targetPlayerId === playerId) {
+    hole.pendingMatchGift = undefined;
+  }
   const clearedPendingPower = hole.pendingPower?.playerId === playerId;
 
   match.players.splice(leavingIndex, 1);
@@ -411,6 +446,10 @@ export function removePlayer(match: MatchState, playerId: string): { remainingPl
   if (hole.knockerId) hole.knockerId = idMap.get(hole.knockerId);
   if (match.eliminatedPlayerIds) match.eliminatedPlayerIds = match.eliminatedPlayerIds.map((id) => idMap.get(id) ?? id);
   if (hole.pendingPower) hole.pendingPower.playerId = idMap.get(hole.pendingPower.playerId) ?? hole.pendingPower.playerId;
+  if (hole.pendingMatchGift) {
+    hole.pendingMatchGift.playerId = idMap.get(hole.pendingMatchGift.playerId) ?? hole.pendingMatchGift.playerId;
+    hole.pendingMatchGift.targetPlayerId = idMap.get(hole.pendingMatchGift.targetPlayerId) ?? hole.pendingMatchGift.targetPlayerId;
+  }
   if (hole.finalTurnQueue) hole.finalTurnQueue = hole.finalTurnQueue.map((id) => idMap.get(id) ?? id);
   if (hole.scores) hole.scores = Object.fromEntries(Object.entries(hole.scores).map(([id, score]) => [idMap.get(id) ?? id, score]));
 
@@ -479,11 +518,18 @@ function assertCanDraw(match: MatchState, playerId: string): void {
   assertInitialPeekComplete(match);
   if (match.hole.heldCard) throw new GolfRuleError("Resolve the drawn card before drawing again.");
   if (match.hole.pendingPower) throw new GolfRuleError("Use or skip the power card before drawing again.");
+  if (match.hole.pendingMatchGift) throw new GolfRuleError("Finish the matching-card gift before drawing again.");
 }
 
 function assertInitialPeekComplete(match: MatchState): void {
   if (activePlayers(match).some((player) => !match.hole.peekedPlayerIds.includes(player.id))) {
     throw new GolfRuleError("Everyone must peek at their cards before the first turn begins.");
+  }
+}
+
+function assertMatchingAvailable(match: MatchState): void {
+  if (match.hole.heldCard || match.hole.pendingPower || match.hole.pendingMatchGift) {
+    throw new GolfRuleError("Finish the current play before calling a match.");
   }
 }
 

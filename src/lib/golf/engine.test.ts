@@ -2,11 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   GolfRuleError,
+  claimOpponentMatch,
   createMatch,
   currentPlayer,
   discardDrawnStockCard,
   drawFromStock,
   eliminatePlayer,
+  giveMatchCard,
   knock,
   matchDiscard,
   peekInitialCards,
@@ -129,19 +131,23 @@ test("matching the discard removes a matching card and reports a wrong call for 
   completeInitialPeeks(match);
   match.hole.discard = [{ id: "5-discard", rank: "5", suit: "clubs" }];
   match.hole.layouts["player-1"][0] = { id: "5-own", rank: "5", suit: "hearts" };
-  assert.equal(matchDiscard(match, "player-1", { playerId: "player-1", layoutIndex: 0 }).correct, true);
+  assert.equal(matchDiscard(match, "player-1", 0).correct, true);
   assert.equal(match.hole.layouts["player-1"].length, 3);
 
   match.hole.discard = [{ id: "7-discard", rank: "7", suit: "clubs" }];
   match.hole.layouts["player-1"][0] = { id: "7-opponent", rank: "7", suit: "hearts" };
+  const opponentCardCount = match.hole.layouts["player-1"].length;
   const gift = match.hole.layouts["player-2"][0];
-  assert.equal(matchDiscard(match, "player-2", { playerId: "player-1", layoutIndex: 0 }, { playerId: "player-2", layoutIndex: 0 }).correct, true);
+  assert.equal(claimOpponentMatch(match, "player-2", { playerId: "player-1", layoutIndex: 0 }).correct, true);
+  assert.equal(match.hole.layouts["player-1"].length, opponentCardCount - 1);
+  giveMatchCard(match, "player-2", 0);
   assert.equal(match.hole.layouts["player-2"].length, 3);
-  assert.equal(match.hole.layouts["player-1"].at(-1)?.id, gift.id);
+  assert.equal(match.hole.layouts["player-1"].length, opponentCardCount);
+  assert.equal(match.hole.layouts["player-1"][0].id, gift.id);
 
   match.hole.discard = [{ id: "9-discard", rank: "9", suit: "clubs" }];
   match.hole.layouts["player-1"][0] = { id: "wrong-target", rank: "6", suit: "hearts" };
-  assert.equal(matchDiscard(match, "player-2", { playerId: "player-1", layoutIndex: 0 }, { playerId: "player-2", layoutIndex: 0 }).correct, false);
+  assert.equal(claimOpponentMatch(match, "player-2", { playerId: "player-1", layoutIndex: 0 }).correct, false);
   assert.equal(match.status, "playing");
   assert.equal(match.hole.layouts["player-1"][0].rank, "6");
 });

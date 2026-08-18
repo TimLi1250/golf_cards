@@ -49,6 +49,13 @@ export type GameView = {
     };
     canUsePower: boolean;
     canMatch: boolean;
+    pendingMatchGift?: {
+      playerId: string;
+      playerName: string;
+      targetPlayerId: string;
+      targetPlayerName: string;
+    };
+    canGiveMatchCard: boolean;
     lastEvent?: {
       id: string;
       message: string;
@@ -72,6 +79,7 @@ export type GameAction =
   | { type: "use-peek-power"; targetPlayerId: string; layoutIndex: number }
   | { type: "skip-power" }
   | { type: "match-own"; layoutIndex: number }
-  | { type: "match-other"; targetPlayerId: string; targetLayoutIndex: number; giftLayoutIndex: number }
+  | { type: "claim-other-match"; targetPlayerId: string; layoutIndex: number }
+  | { type: "give-match-card"; layoutIndex: number }
   | { type: "knock" }
   | { type: "next-hole" };

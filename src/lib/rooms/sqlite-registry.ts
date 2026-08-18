@@ -5,7 +5,9 @@ import { DatabaseSync } from "node:sqlite";
 import {
   discardDrawnStockCard,
   drawFromStock,
+  claimOpponentMatch,
   eliminatePlayer,
+  giveMatchCard,
   knock,
   matchDiscard,
   peekInitialCards,
@@ -249,7 +251,8 @@ export class SqliteRoomRegistry {
     const currentRoomPlayer = players[currentIndex];
     const activeEnginePlayers = match.players.filter((player) => !match.eliminatedPlayerIds?.includes(player.id));
     const isPeeking = match.status === "playing" && match.hole.status === "playing" && activeEnginePlayers.some((player) => !match.hole.peekedPlayerIds.includes(player.id));
-    const viewerCanAct = match.status === "playing" && !isPeeking && match.hole.status === "playing" && currentEnginePlayer?.id === viewerEngineId;
+    const pendingMatchGift = match.hole.pendingMatchGift;
+    const viewerCanAct = match.status === "playing" && !isPeeking && match.hole.status === "playing" && !pendingMatchGift && currentEnginePlayer?.id === viewerEngineId;
     const pendingPower = match.hole.pendingPower;
     const pendingPowerIndex = pendingPower ? match.players.findIndex((player) => player.id === pendingPower.playerId) : -1;
     const viewPlayers = players.map((player, index) => {
@@ -300,7 +303,14 @@ export class SqliteRoomRegistry {
           playerName: match.players[pendingPowerIndex]?.name || "A player",
         } : undefined,
         canUsePower: viewerCanAct && pendingPower?.playerId === viewerEngineId,
-        canMatch: match.status === "playing" && !isPeeking && match.hole.status === "playing" && !match.hole.heldCard && !pendingPower && Boolean(viewerEngineId && !match.eliminatedPlayerIds?.includes(viewerEngineId) && match.hole.layouts[viewerEngineId]?.length),
+        canMatch: match.status === "playing" && !isPeeking && match.hole.status === "playing" && !match.hole.heldCard && !pendingPower && !pendingMatchGift && Boolean(viewerEngineId && !match.eliminatedPlayerIds?.includes(viewerEngineId) && match.hole.layouts[viewerEngineId]?.length),
+        pendingMatchGift: pendingMatchGift ? {
+          playerId: players[match.players.findIndex((player) => player.id === pendingMatchGift.playerId)]?.id || "",
+          playerName: match.players.find((player) => player.id === pendingMatchGift.playerId)?.name || "A player",
+          targetPlayerId: players[match.players.findIndex((player) => player.id === pendingMatchGift.targetPlayerId)]?.id || "",
+          targetPlayerName: match.players.find((player) => player.id === pendingMatchGift.targetPlayerId)?.name || "another player",
+        } : undefined,
+        canGiveMatchCard: pendingMatchGift?.playerId === viewerEngineId,
         knockerName: match.hole.knockerId ? match.players.find((player) => player.id === match.hole.knockerId)?.name : undefined,
         lastEvent: match.lastEvent,
         players: viewPlayers,
@@ -320,7 +330,11 @@ export class SqliteRoomRegistry {
     const match = JSON.parse(storedGame.game_state) as MatchState;
     let privatePeek: PublicCard[] | undefined;
     let privatePowerPeek: { playerId: string; layoutIndex: number; card: PublicCard } | undefined;
-    let eventType: NonNullable<MatchEvent["type"]> = action.type === "use-swap-power" || action.type === "use-peek-power" ? "power-peek" : action.type;
+    let eventType: NonNullable<MatchEvent["type"]> = action.type === "use-swap-power" || action.type === "use-peek-power"
+      ? "power-peek"
+      : action.type === "claim-other-match" || action.type === "give-match-card"
+        ? "match-other"
+        : action.type;
     let eventMessage: string | undefined;
     let affectedCards: { playerId: string; layoutIndex: number }[] | undefined;
     const engineReference = (roomId: string, layoutIndex: number): LayoutCardReference => {
@@ -359,7 +373,7 @@ export class SqliteRoomRegistry {
         eventMessage = `${players[playerIndex]?.name || "A player"} skipped the power card.`;
         break;
       case "match-own": {
-        const result = matchDiscard(match, enginePlayerId, { playerId: enginePlayerId, layoutIndex: action.layoutIndex });
+        const result = matchDiscard(match, enginePlayerId, action.layoutIndex);
         eventType = "match-own";
         let elimination;
         if (!result.correct) {
@@ -370,8 +384,8 @@ export class SqliteRoomRegistry {
         affectedCards = [{ playerId: roomPlayerId, layoutIndex: action.layoutIndex }];
         break;
       }
-      case "match-other": {
-        const result = matchDiscard(match, enginePlayerId, engineReference(action.targetPlayerId, action.targetLayoutIndex), { playerId: enginePlayerId, layoutIndex: action.giftLayoutIndex });
+      case "claim-other-match": {
+        const result = claimOpponentMatch(match, enginePlayerId, engineReference(action.targetPlayerId, action.layoutIndex));
         eventType = "match-other";
         const targetName = players.find((player) => player.id === action.targetPlayerId)?.name || "another player";
         let elimination;
@@ -379,8 +393,18 @@ export class SqliteRoomRegistry {
           elimination = eliminatePlayer(match, enginePlayerId);
         }
         const winnerName = elimination?.winnerId ? match.players.find((player) => player.id === elimination.winnerId)?.name || "The remaining player" : "";
-        eventMessage = result.correct ? `${players[playerIndex]?.name || "A player"} matched ${targetName}'s card and handed one over.` : elimination?.advanced ? `${players[playerIndex]?.name || "A player"} called ${targetName}'s card wrong. ${winnerName} wins the hole — next hole starts now.` : `${players[playerIndex]?.name || "A player"} called ${targetName}'s card wrong and is out of the game.`;
-        affectedCards = [{ playerId: action.targetPlayerId, layoutIndex: action.targetLayoutIndex }, { playerId: roomPlayerId, layoutIndex: action.giftLayoutIndex }];
+        eventMessage = result.correct ? `${players[playerIndex]?.name || "A player"} matched ${targetName}'s card and must now give one card.` : elimination?.advanced ? `${players[playerIndex]?.name || "A player"} called ${targetName}'s card wrong. ${winnerName} wins the hole — next hole starts now.` : `${players[playerIndex]?.name || "A player"} called ${targetName}'s card wrong and is out of the game.`;
+        affectedCards = [{ playerId: action.targetPlayerId, layoutIndex: action.layoutIndex }];
+        break;
+      }
+      case "give-match-card": {
+        const pendingGift = match.hole.pendingMatchGift;
+        if (!pendingGift) throw new RoomError("There is no matching-card gift waiting for you.");
+        const targetIndex = match.players.findIndex((player) => player.id === pendingGift.targetPlayerId);
+        giveMatchCard(match, enginePlayerId, action.layoutIndex);
+        eventType = "match-other";
+        eventMessage = `${players[playerIndex]?.name || "A player"} gave a card to ${players[targetIndex]?.name || "another player"}.`;
+        affectedCards = [{ playerId: players[targetIndex]?.id || "", layoutIndex: pendingGift.targetLayoutIndex }, { playerId: roomPlayerId, layoutIndex: action.layoutIndex }];
         break;
       }
       case "knock": knock(match, enginePlayerId); break;
@@ -509,7 +533,8 @@ function actionMessage(playerName: string, action: Exclude<GameAction, { type: "
     case "use-peek-power": return `${playerName} inspected a card.`;
     case "skip-power": return `${playerName} skipped a power card.`;
     case "match-own": return `${playerName} called a matching card.`;
-    case "match-other": return `${playerName} called another player's card.`;
+    case "claim-other-match": return `${playerName} called another player's card.`;
+    case "give-match-card": return `${playerName} gave a matching-card gift.`;
     case "knock": return `${playerName} knocked — final turns begin.`;
     case "next-hole": return `${playerName} dealt the next hole.`;
   }
@@ -529,7 +554,7 @@ declare global {
 }
 
 export function persistentRoomRegistry(): SqliteRoomRegistry {
-  const registryVersion = 16;
+  const registryVersion = 17;
   if (globalThis.fairwayFourRoomRegistryVersion !== registryVersion || !globalThis.fairwayFourRoomRegistry) {
     const oldRegistry = globalThis.fairwayFourRoomRegistry as { close?: unknown } | undefined;
     if (typeof oldRegistry?.close === "function") oldRegistry.close();

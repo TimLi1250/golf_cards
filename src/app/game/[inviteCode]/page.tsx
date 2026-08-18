@@ -25,7 +25,6 @@ export default function GamePage() {
   const [recentPeek, setRecentPeek] = useState<RecentPeek>();
   const [recentPowerPeek, setRecentPowerPeek] = useState<RecentPowerPeek>();
   const [powerSwapSelection, setPowerSwapSelection] = useState<CardSelection>();
-  const [matchTarget, setMatchTarget] = useState<CardSelection>();
   const [connectedPlayerIds, setConnectedPlayerIds] = useState<Set<string>>(new Set());
   const [recentReplacement, setRecentReplacement] = useState<RecentReplacement>();
   const [leaveConfirmation, setLeaveConfirmation] = useState(false);
@@ -192,14 +191,8 @@ export default function GamePage() {
       void sendAction({ type: "use-peek-power", targetPlayerId: playerId, layoutIndex });
       return;
     }
-    if (matchTarget) {
-      if (isYou) {
-        const target = matchTarget;
-        setMatchTarget(undefined);
-        void sendAction({ type: "match-other", targetPlayerId: target.playerId, targetLayoutIndex: target.layoutIndex, giftLayoutIndex: layoutIndex });
-      } else {
-        setMatchTarget({ playerId, layoutIndex });
-      }
+    if (game.canGiveMatchCard) {
+      if (isYou) void sendAction({ type: "give-match-card", layoutIndex });
       return;
     }
     if (isYou && game.canAct && game.heldCard) {
@@ -208,7 +201,7 @@ export default function GamePage() {
     }
     if (!game.canMatch) return;
     if (isYou) void sendAction({ type: "match-own", layoutIndex });
-    else setMatchTarget({ playerId, layoutIndex });
+    else void sendAction({ type: "claim-other-match", targetPlayerId: playerId, layoutIndex });
   }
 
   return <main className="game-screen">
@@ -231,10 +224,9 @@ export default function GamePage() {
           const peekCard = player.isYou && peekedCard && recentPeek && recentPeek.eventId === game.lastEvent?.id ? recentPeek.cards[cardIndex - 2] : undefined;
           const powerPeekCard = recentPowerPeek && recentPowerPeek.eventId === game.lastEvent?.id && recentPowerPeek.playerId === player.id && recentPowerPeek.layoutIndex === cardIndex ? recentPowerPeek.card : undefined;
           const selectedForSwap = powerSwapSelection?.playerId === player.id && powerSwapSelection.layoutIndex === cardIndex;
-          const selectedForMatch = matchTarget?.playerId === player.id && matchTarget.layoutIndex === cardIndex;
           const displayedCard = replacementCard || peekCard || powerPeekCard || card;
-          const canSelect = !player.isOut && game.phase === "playing" && (game.canUsePower || Boolean(matchTarget) || (player.isYou && game.canAct && game.heldCard) || game.canMatch);
-          return <button key={`${cardIndex}-${highlighted ? game.lastEvent?.id : "idle"}`} disabled={!canSelect} onClick={() => handleCardClick(player.id, player.isYou, player.isOut, cardIndex)} className={`layout-card ${highlighted ? "action-card-highlight" : ""} ${replacementCard ? "placed-card" : ""} ${peekCard || powerPeekCard ? "peeked-card" : ""} ${selectedForSwap || selectedForMatch ? "selected-table-card" : ""}`}><Card card={displayedCard} /></button>;
+          const canSelect = !player.isOut && game.phase === "playing" && (game.canUsePower || (game.canGiveMatchCard && player.isYou) || (player.isYou && game.canAct && game.heldCard) || game.canMatch);
+          return <button key={`${cardIndex}-${highlighted ? game.lastEvent?.id : "idle"}`} disabled={!canSelect} onClick={() => handleCardClick(player.id, player.isYou, player.isOut, cardIndex)} className={`layout-card ${highlighted ? "action-card-highlight" : ""} ${replacementCard ? "placed-card" : ""} ${peekCard || powerPeekCard ? "peeked-card" : ""} ${selectedForSwap ? "selected-table-card" : ""}`}><Card card={displayedCard} /></button>;
         })}</div></article>)}
       </section>
       <section className="turn-controls">
@@ -243,10 +235,10 @@ export default function GamePage() {
           {game.isPeeking && <p>Everyone must peek at two cards before play begins.</p>}
           {game.canUsePower && game.pendingPower?.rank === "8" && <><p>8 POWER: {powerSwapSelection ? "choose one more card to swap, or choose this card again to cancel." : "choose any two cards to swap face-down."}</p><button className="outline" onClick={() => { setPowerSwapSelection(undefined); void sendAction({ type: "skip-power" }); }}>DON&apos;T SWAP</button></>}
           {game.canUsePower && (game.pendingPower?.rank === "J" || game.pendingPower?.rank === "Q") && <><p>{game.pendingPower.rank} POWER: click {game.pendingPower.rank === "J" ? "one of your own cards" : "one card at the table"} to peek at it.</p><button className="outline" onClick={() => void sendAction({ type: "skip-power" })}>SKIP PEEK</button></>}
-          {matchTarget && <><p>MATCH CALL: now choose one of your own cards to give to {game.players.find((player) => player.id === matchTarget.playerId)?.name || "that player"}.</p><button className="outline" onClick={() => setMatchTarget(undefined)}>CANCEL MATCH</button></>}
+          {game.canGiveMatchCard && game.pendingMatchGift && <p>MATCH CONFIRMED: {game.pendingMatchGift.targetPlayerName}&apos;s card is gone. Choose one of your cards to give them.</p>}
           {game.canAct && !game.heldCard && !game.pendingPower && <><button onClick={() => sendAction({ type: "draw-stock" })}>DRAW STOCK</button><button onClick={() => sendAction({ type: "take-discard" })}>TAKE DISCARD</button><button className="outline" onClick={() => sendAction({ type: "knock" })}>KNOCK</button></>}
           {game.canAct && game.heldCard && <><div className="held-card"><span>DRAWN CARD</span><Card card={game.heldCard} /></div>{game.heldCardSource === "stock" && <button className="outline" onClick={() => sendAction({ type: "discard-drawn" })}>DISCARD DRAWN CARD</button>}<p>Choose one of your cards to replace.</p></>}
-          {game.canMatch && !matchTarget && <p className="match-hint">MATCH THE DISCARD: click one of your cards, or click another player&apos;s card and then one of yours.</p>}
+          {game.canMatch && <p className="match-hint">MATCH THE DISCARD: click one of your cards, or click an opponent&apos;s card to check it.</p>}
         </>}
       </section>
       {error && <p className="game-error">{error}</p>}
