@@ -36,13 +36,18 @@ test("stores an authoritative game while keeping layout card faces private", () 
     registry.join(room.inviteCode, { playerId: "player-b", playerName: "Blake" });
     const started = registry.startGame(room.inviteCode, "player-a");
     assert.equal(started.game?.phase, "playing");
+    assert.equal(started.game?.discard, null);
+    assert.equal(started.game?.canMatch, false);
     assert.deepEqual(started.game?.players[0].cards, [null, null, null, null]);
 
     const peek = registry.act(room.inviteCode, "player-a", { type: "peek" });
     assert.equal(peek.privatePeek?.length, 2);
     assert.deepEqual(peek.view!.game?.players[0].cards, [null, null, null, null]);
 
-    registry.act(room.inviteCode, "player-b", { type: "peek" });
+    const ready = registry.act(room.inviteCode, "player-b", { type: "peek" });
+    assert.equal(ready.view.game?.canAct, true);
+    assert.equal(ready.view.game?.discard, null);
+    assert.equal(ready.view.game?.canMatch, false);
 
     const drawn = registry.act(room.inviteCode, "player-b", { type: "draw-stock" });
     assert.ok(drawn.view!.game?.heldCard);

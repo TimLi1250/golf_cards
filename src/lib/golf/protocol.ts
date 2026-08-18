@@ -1,6 +1,6 @@
 import type { Card } from "./engine";
 
-export type PublicCard = Pick<Card, "rank" | "suit">;
+export type PublicCard = Pick<Card, "rank" | "suit" | "jokerColor">;
 
 export type TablePlayerView = {
   id: string;
@@ -9,6 +9,8 @@ export type TablePlayerView = {
   isOut: boolean;
   cardCount: number;
   cards: (PublicCard | null)[];
+  occupiedSlots: boolean[];
+  disconnectDeadline?: number;
   totalScore: number;
   score?: number;
 };
@@ -33,7 +35,7 @@ export type GameView = {
     currentPlayerId?: string;
     currentPlayerName?: string;
     stockCount: number;
-    discard: PublicCard;
+    discard: PublicCard | null;
     heldCard?: PublicCard;
     isPeeking: boolean;
     peekedPlayers: number;
@@ -42,6 +44,7 @@ export type GameView = {
     canAct: boolean;
     heldCardSource?: "stock" | "discard";
     knockerName?: string;
+    finalMatchDeadline?: number;
     pendingPower?: {
       rank: "8" | "J" | "Q";
       playerId: string;
@@ -60,7 +63,7 @@ export type GameView = {
       id: string;
       message: string;
       playerId?: string;
-      type?: "start" | "peek" | "draw-stock" | "take-discard" | "replace" | "discard-drawn" | "knock" | "next-hole" | "leave" | "power-swap" | "power-peek" | "skip-power" | "match-own" | "match-other";
+      type?: "start" | "peek" | "draw-stock" | "take-discard" | "replace" | "discard-drawn" | "knock" | "finalize-knock" | "next-hole" | "leave" | "power-swap" | "power-peek" | "skip-power" | "match-own" | "match-other";
       layoutIndex?: number;
       affectedCards?: { playerId: string; layoutIndex: number }[];
     };
@@ -82,4 +85,5 @@ export type GameAction =
   | { type: "claim-other-match"; targetPlayerId: string; layoutIndex: number }
   | { type: "give-match-card"; layoutIndex: number }
   | { type: "knock" }
+  | { type: "finalize-knock" }
   | { type: "next-hole" };

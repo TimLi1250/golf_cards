@@ -3,11 +3,13 @@ import test from "node:test";
 import {
   GolfRuleError,
   claimOpponentMatch,
+  createDeck,
   createMatch,
   currentPlayer,
   discardDrawnStockCard,
   drawFromStock,
   eliminatePlayer,
+  finalizeKnock,
   giveMatchCard,
   knock,
   matchDiscard,
@@ -37,14 +39,23 @@ function finishStockTurn(match: ReturnType<typeof createMatch>, playerId: string
   if (match.hole.pendingPower) skipPower(match, playerId);
 }
 
+function cardId(card: ReturnType<typeof createMatch>["hole"]["layouts"][string][number]) {
+  return card?.id;
+}
+
 test("deals four unique cards to every player and begins left of dealer", () => {
   const match = createMatch(players, { random: deterministicRandom });
   const allCards = Object.values(match.hole.layouts).flat();
   assert.equal(allCards.length, 16);
-  assert.equal(new Set(allCards.map((card) => card.id)).size, 16);
+  assert.equal(new Set(allCards.map((card) => card?.id)).size, 16);
   assert.equal(currentPlayer(match).name, "Blake");
-  assert.equal(match.hole.stock.length, 37);
-  assert.equal(match.hole.discard.length, 1);
+  assert.equal(match.hole.stock.length, 38);
+  assert.equal(match.hole.discard.length, 0);
+});
+
+test("creates one red and one black joker per deck", () => {
+  const jokers = createDeck().filter((card) => card.rank === "JOKER");
+  assert.deepEqual(jokers.map((card) => card.jokerColor), ["red", "black"]);
 });
 
 test("supports up to twelve players and adds a second deck after six players", () => {
@@ -53,8 +64,8 @@ test("supports up to twelve players and adds a second deck after six players", (
     { random: deterministicRandom },
   );
   assert.equal(twelvePlayerMatch.hole.deckCount, 2);
-  assert.equal(twelvePlayerMatch.hole.stock.length, 59);
-  assert.equal(new Set(Object.values(twelvePlayerMatch.hole.layouts).flat().map((card) => card.id)).size, 48);
+  assert.equal(twelvePlayerMatch.hole.stock.length, 60);
+  assert.equal(new Set(Object.values(twelvePlayerMatch.hole.layouts).flat().map((card) => card?.id)).size, 48);
 
   const sixPlayerMatch = createMatch(players.slice(0, 4).concat(["Emery", "Frankie"]), { random: deterministicRandom });
   assert.equal(sixPlayerMatch.hole.deckCount, 1);
@@ -85,6 +96,7 @@ test("stock card may be discarded without replacing a layout card", () => {
 test("a discard draw must replace a card", () => {
   const match = createMatch(players, { random: deterministicRandom });
   completeInitialPeeks(match);
+  match.hole.discard.push(match.hole.stock.pop()!);
   takeDiscard(match, "player-2");
   assert.throws(() => discardDrawnStockCard(match, "player-2"), GolfRuleError);
   replaceLayoutCard(match, "player-2", 0);
@@ -114,7 +126,7 @@ test("jacks and queens privately reveal permitted cards", () => {
   jackMatch.hole.heldCard = { card: { id: "replacement", rank: "3", suit: "hearts" }, source: "stock" };
   replaceLayoutCard(jackMatch, "player-2", 0);
   const own = resolvePeekPower(jackMatch, "player-2", { playerId: "player-2", layoutIndex: 1 });
-  assert.equal(own.id, jackMatch.hole.layouts["player-2"][1].id);
+  assert.equal(own.id, jackMatch.hole.layouts["player-2"][1]?.id);
   assert.throws(() => resolvePeekPower(jackMatch, "player-2", { playerId: "player-1", layoutIndex: 0 }), GolfRuleError);
 
   const queenMatch = createMatch(players, { random: deterministicRandom });
@@ -123,7 +135,7 @@ test("jacks and queens privately reveal permitted cards", () => {
   queenMatch.hole.heldCard = { card: { id: "replacement", rank: "3", suit: "hearts" }, source: "stock" };
   replaceLayoutCard(queenMatch, "player-2", 0);
   const opponent = resolvePeekPower(queenMatch, "player-2", { playerId: "player-1", layoutIndex: 0 });
-  assert.equal(opponent.id, queenMatch.hole.layouts["player-1"][0].id);
+  assert.equal(opponent.id, queenMatch.hole.layouts["player-1"][0]?.id);
 });
 
 test("matching the discard removes a matching card and reports a wrong call for elimination", () => {
@@ -132,24 +144,27 @@ test("matching the discard removes a matching card and reports a wrong call for 
   match.hole.discard = [{ id: "5-discard", rank: "5", suit: "clubs" }];
   match.hole.layouts["player-1"][0] = { id: "5-own", rank: "5", suit: "hearts" };
   assert.equal(matchDiscard(match, "player-1", 0).correct, true);
-  assert.equal(match.hole.layouts["player-1"].length, 3);
+  assert.equal(match.hole.layouts["player-1"].length, 4);
+  assert.equal(match.hole.layouts["player-1"][0], null);
 
   match.hole.discard = [{ id: "7-discard", rank: "7", suit: "clubs" }];
   match.hole.layouts["player-1"][0] = { id: "7-opponent", rank: "7", suit: "hearts" };
   const opponentCardCount = match.hole.layouts["player-1"].length;
-  const gift = match.hole.layouts["player-2"][0];
+  const giftId = match.hole.layouts["player-2"][0]?.id;
   assert.equal(claimOpponentMatch(match, "player-2", { playerId: "player-1", layoutIndex: 0 }).correct, true);
-  assert.equal(match.hole.layouts["player-1"].length, opponentCardCount - 1);
-  giveMatchCard(match, "player-2", 0);
-  assert.equal(match.hole.layouts["player-2"].length, 3);
   assert.equal(match.hole.layouts["player-1"].length, opponentCardCount);
-  assert.equal(match.hole.layouts["player-1"][0].id, gift.id);
+  assert.equal(match.hole.layouts["player-1"][0], null);
+  giveMatchCard(match, "player-2", 0);
+  assert.equal(match.hole.layouts["player-2"].length, 4);
+  assert.equal(match.hole.layouts["player-2"][0], null);
+  assert.equal(match.hole.layouts["player-1"].length, opponentCardCount);
+  assert.equal(cardId(match.hole.layouts["player-1"][0]), giftId);
 
   match.hole.discard = [{ id: "9-discard", rank: "9", suit: "clubs" }];
   match.hole.layouts["player-1"][0] = { id: "wrong-target", rank: "6", suit: "hearts" };
   assert.equal(claimOpponentMatch(match, "player-2", { playerId: "player-1", layoutIndex: 0 }).correct, false);
   assert.equal(match.status, "playing");
-  assert.equal(match.hole.layouts["player-1"][0].rank, "6");
+  assert.equal(match.hole.layouts["player-1"][0]?.rank, "6");
 });
 
 test("the last active player wins the hole and automatically starts the next one", () => {
@@ -165,7 +180,7 @@ test("the last active player wins the hole and automatically starts the next one
   assert.equal(currentPlayer(match).id, "player-3");
 });
 
-test("knock gives every other player exactly one final normal turn then scores", () => {
+test("knock gives every other player one turn then opens a five-second matching window", () => {
   const match = createMatch(players, { random: deterministicRandom });
   completeInitialPeeks(match);
   knock(match, "player-2");
@@ -173,9 +188,25 @@ test("knock gives every other player exactly one final normal turn then scores",
   for (const playerId of ["player-3", "player-4", "player-1"]) {
     finishStockTurn(match, playerId);
   }
+  assert.equal(match.hole.status, "playing");
+  assert.ok(match.hole.finalMatchDeadline);
+  assert.throws(() => finalizeKnock(match, match.hole.finalMatchDeadline! - 1), /still open/);
+  finalizeKnock(match, match.hole.finalMatchDeadline);
   assert.equal(match.hole.status, "scored");
-  assert.ok(match.hole.scores);
   assert.throws(() => drawFromStock(match, "player-2"), GolfRuleError);
+});
+
+test("a knock during final turns passes without rebuilding the final-turn queue", () => {
+  const match = createMatch(players, { random: deterministicRandom });
+  completeInitialPeeks(match);
+  knock(match, "player-2");
+  assert.deepEqual(match.hole.finalTurnQueue, ["player-3", "player-4", "player-1"]);
+
+  knock(match, "player-3");
+
+  assert.equal(match.hole.knockerId, "player-2");
+  assert.deepEqual(match.hole.finalTurnQueue, ["player-4", "player-1"]);
+  assert.equal(currentPlayer(match).id, "player-4");
 });
 
 test("scores cards and progresses to the next hole", () => {
@@ -188,6 +219,7 @@ test("scores cards and progresses to the next hole", () => {
   for (const playerId of ["player-3", "player-4", "player-1"]) {
     finishStockTurn(match, playerId);
   }
+  finalizeKnock(match, match.hole.finalMatchDeadline);
   startNextHole(match);
   assert.equal(match.status, "finished");
 });

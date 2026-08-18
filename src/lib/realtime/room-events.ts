@@ -18,3 +18,7 @@ export function publishRoomUpdate(inviteCode: string): void {
 export function publishPresenceUpdate(inviteCode: string, playerIds: string[]): void {
   roomEvents.emit("presence:update", inviteCode, playerIds);
 }
+
+export function publishDisconnectRequest(inviteCode: string, playerId: string, socketId?: string): void {
+  roomEvents.emit("disconnect:begin", inviteCode.toUpperCase(), playerId, socketId);
+}

@@ -9,6 +9,7 @@ import {
   eliminatePlayer,
   giveMatchCard,
   knock,
+  finalizeKnock,
   matchDiscard,
   peekInitialCards,
   replaceLayoutCard,
@@ -22,6 +23,7 @@ import {
 } from "../golf/engine";
 import type { Card, LayoutCardReference, MatchEvent, MatchState } from "../golf/engine";
 import type { GameAction, GameView, PublicCard } from "../golf/protocol";
+import { disconnectDeadline } from "../realtime/disconnect-state";
 import { PublicRoom, Room, RoomError, RoomPlayer } from "./registry";
 
 type RoomRow = {
@@ -252,7 +254,7 @@ export class SqliteRoomRegistry {
     const activeEnginePlayers = match.players.filter((player) => !match.eliminatedPlayerIds?.includes(player.id));
     const isPeeking = match.status === "playing" && match.hole.status === "playing" && activeEnginePlayers.some((player) => !match.hole.peekedPlayerIds.includes(player.id));
     const pendingMatchGift = match.hole.pendingMatchGift;
-    const viewerCanAct = match.status === "playing" && !isPeeking && match.hole.status === "playing" && !pendingMatchGift && currentEnginePlayer?.id === viewerEngineId;
+    const viewerCanAct = match.status === "playing" && !isPeeking && match.hole.status === "playing" && !match.hole.finalMatchDeadline && !pendingMatchGift && currentEnginePlayer?.id === viewerEngineId;
     const pendingPower = match.hole.pendingPower;
     const pendingPowerIndex = pendingPower ? match.players.findIndex((player) => player.id === pendingPower.playerId) : -1;
     const viewPlayers = players.map((player, index) => {
@@ -263,8 +265,10 @@ export class SqliteRoomRegistry {
         name: player.name,
         isYou: player.id === playerId,
         isOut: match.eliminatedPlayerIds?.includes(enginePlayerId) ?? false,
-        cardCount: layout.length,
-        cards: layout.map((card) => (revealed ? publicCard(card) : null)),
+        cardCount: layout.filter(Boolean).length,
+        cards: layout.map((card) => (revealed && card ? publicCard(card) : null)),
+        occupiedSlots: layout.map(Boolean),
+        disconnectDeadline: disconnectDeadline(room.invite_code, player.id),
         totalScore: match.players[index]?.totalScore || 0,
         score: revealed ? match.hole.scores?.[enginePlayerId] : undefined,
       };
@@ -272,7 +276,7 @@ export class SqliteRoomRegistry {
 
     const phase = match.status === "finished" ? "finished" : match.hole.status;
     const discard = match.hole.discard.at(-1);
-    if (!discard) throw new RoomError("Game state is missing a discard card.");
+    const finalMatching = Boolean(match.hole.finalMatchDeadline);
     return {
       room: roomView,
       canStart,
@@ -286,10 +290,10 @@ export class SqliteRoomRegistry {
           playerName: match.players.find((player) => player.id === tieBreakPlayerId)?.name || "A player",
           card: publicCard(card),
         }))),
-        currentPlayerId: currentRoomPlayer?.id,
-        currentPlayerName: currentRoomPlayer?.name,
+        currentPlayerId: finalMatching ? undefined : currentRoomPlayer?.id,
+        currentPlayerName: finalMatching ? undefined : currentRoomPlayer?.name,
         stockCount: match.hole.stock.length,
-        discard: publicCard(discard),
+        discard: discard ? publicCard(discard) : null,
         heldCard: viewerCanAct && match.hole.heldCard ? publicCard(match.hole.heldCard.card) : undefined,
         isPeeking,
         peekedPlayers: match.hole.peekedPlayerIds.filter((id) => activeEnginePlayers.some((player) => player.id === id)).length,
@@ -303,7 +307,7 @@ export class SqliteRoomRegistry {
           playerName: match.players[pendingPowerIndex]?.name || "A player",
         } : undefined,
         canUsePower: viewerCanAct && pendingPower?.playerId === viewerEngineId,
-        canMatch: match.status === "playing" && !isPeeking && match.hole.status === "playing" && !match.hole.heldCard && !pendingPower && !pendingMatchGift && Boolean(viewerEngineId && !match.eliminatedPlayerIds?.includes(viewerEngineId) && match.hole.layouts[viewerEngineId]?.length),
+        canMatch: Boolean(discard) && match.status === "playing" && !isPeeking && match.hole.status === "playing" && !match.hole.heldCard && !pendingPower && !pendingMatchGift && Boolean(viewerEngineId && !match.eliminatedPlayerIds?.includes(viewerEngineId) && match.hole.layouts[viewerEngineId]?.some(Boolean)),
         pendingMatchGift: pendingMatchGift ? {
           playerId: players[match.players.findIndex((player) => player.id === pendingMatchGift.playerId)]?.id || "",
           playerName: match.players.find((player) => player.id === pendingMatchGift.playerId)?.name || "A player",
@@ -312,6 +316,7 @@ export class SqliteRoomRegistry {
         } : undefined,
         canGiveMatchCard: pendingMatchGift?.playerId === viewerEngineId,
         knockerName: match.hole.knockerId ? match.players.find((player) => player.id === match.hole.knockerId)?.name : undefined,
+        finalMatchDeadline: match.hole.finalMatchDeadline,
         lastEvent: match.lastEvent,
         players: viewPlayers,
       },
@@ -407,7 +412,13 @@ export class SqliteRoomRegistry {
         affectedCards = [{ playerId: players[targetIndex]?.id || "", layoutIndex: pendingGift.targetLayoutIndex }, { playerId: roomPlayerId, layoutIndex: action.layoutIndex }];
         break;
       }
-      case "knock": knock(match, enginePlayerId); break;
+      case "knock": {
+        const alreadyKnocked = Boolean(match.hole.knockerId);
+        knock(match, enginePlayerId);
+        if (alreadyKnocked) eventMessage = `${players[playerIndex]?.name || "A player"} passed their final turn.`;
+        break;
+      }
+      case "finalize-knock": finalizeKnock(match); break;
       case "next-hole": startNextHole(match); break;
     }
     const playerName = players[playerIndex]?.name || "A player";
@@ -536,6 +547,7 @@ function actionMessage(playerName: string, action: Exclude<GameAction, { type: "
     case "claim-other-match": return `${playerName} called another player's card.`;
     case "give-match-card": return `${playerName} gave a matching-card gift.`;
     case "knock": return `${playerName} knocked — final turns begin.`;
+    case "finalize-knock": return "The final matching window closed.";
     case "next-hole": return `${playerName} dealt the next hole.`;
   }
 }
@@ -545,7 +557,11 @@ function eventId(): string {
 }
 
 function publicCard(card: Card): PublicCard {
-  return { rank: card.rank, suit: card.suit };
+  return {
+    rank: card.rank,
+    suit: card.suit,
+    jokerColor: card.rank === "JOKER" ? card.jokerColor ?? (card.id.includes("JOKER-red-") ? "red" : "black") : undefined,
+  };
 }
 
 declare global {

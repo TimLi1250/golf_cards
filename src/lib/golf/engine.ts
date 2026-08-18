@@ -5,6 +5,7 @@ export type Card = {
   id: string;
   rank: Rank;
   suit: Suit;
+  jokerColor?: "red" | "black";
 };
 
 export type Player = {
@@ -37,7 +38,7 @@ export type HoleState = {
   number: number;
   dealerIndex: number;
   deckCount: number;
-  layouts: Record<string, Card[]>;
+  layouts: Record<string, (Card | null)[]>;
   stock: Card[];
   discard: Card[];
   currentPlayerIndex: number;
@@ -47,6 +48,7 @@ export type HoleState = {
   peekedPlayerIds: string[];
   knockerId?: string;
   finalTurnQueue?: string[];
+  finalMatchDeadline?: number;
   status: "playing" | "scored";
   scores?: Record<string, number>;
   winnerId?: string;
@@ -66,7 +68,7 @@ export type MatchEvent = {
   id: string;
   message: string;
   playerId?: string;
-  type?: "start" | "peek" | "draw-stock" | "take-discard" | "replace" | "discard-drawn" | "knock" | "next-hole" | "leave" | "power-swap" | "power-peek" | "skip-power" | "match-own" | "match-other";
+  type?: "start" | "peek" | "draw-stock" | "take-discard" | "replace" | "discard-drawn" | "knock" | "finalize-knock" | "next-hole" | "leave" | "power-swap" | "power-peek" | "skip-power" | "match-own" | "match-other";
   layoutIndex?: number;
   affectedCards?: { playerId: string; layoutIndex: number }[];
 };
@@ -82,8 +84,8 @@ export function createDeck(deckCount = 1): Card[] {
   }
   return Array.from({ length: deckCount }, (_, deckIndex) => [
     ...suits.flatMap((suit) => ranks.map((rank) => ({ id: `${rank}-${suit}-${deckIndex + 1}`, rank, suit }))),
-    { id: `JOKER-red-${deckIndex + 1}`, rank: "JOKER" as const, suit: "joker" as const },
-    { id: `JOKER-black-${deckIndex + 1}`, rank: "JOKER" as const, suit: "joker" as const },
+    { id: `JOKER-red-${deckIndex + 1}`, rank: "JOKER" as const, suit: "joker" as const, jokerColor: "red" as const },
+    { id: `JOKER-black-${deckIndex + 1}`, rank: "JOKER" as const, suit: "joker" as const, jokerColor: "black" as const },
   ]).flat();
 }
 
@@ -105,8 +107,8 @@ export function scoreCard(card: Card): number {
   return Number(card.rank);
 }
 
-export function scoreLayout(layout: Card[]): number {
-  return layout.reduce((total, card) => total + scoreCard(card), 0);
+export function scoreLayout(layout: (Card | null)[]): number {
+  return layout.reduce((total, card) => total + (card ? scoreCard(card) : 0), 0);
 }
 
 export function createMatch(
@@ -132,7 +134,7 @@ export function createMatch(
 export function dealHole(players: Player[], number: number, dealerIndex: number, random?: () => number): HoleState {
   const deckCount = players.length > 6 ? 2 : 1;
   const deck = shuffle(createDeck(deckCount), random);
-  const layouts: Record<string, Card[]> = Object.fromEntries(players.map((player) => [player.id, []]));
+  const layouts: Record<string, (Card | null)[]> = Object.fromEntries(players.map((player) => [player.id, []]));
 
   for (let cardNumber = 0; cardNumber < 4; cardNumber += 1) {
     for (const player of players) {
@@ -141,16 +143,13 @@ export function dealHole(players: Player[], number: number, dealerIndex: number,
       layouts[player.id].push(card);
     }
   }
-  const firstDiscard = deck.pop();
-  if (!firstDiscard) throw new GolfRuleError("Deck ran out while dealing.");
-
   return {
     number,
     dealerIndex,
     deckCount,
     layouts,
     stock: deck,
-    discard: [firstDiscard],
+    discard: [],
     currentPlayerIndex: (dealerIndex + 1) % players.length,
     peekedPlayerIds: [],
     status: "playing",
@@ -170,7 +169,7 @@ export function peekInitialCards(match: MatchState, playerId: string): Card[] {
   }
   hole.peekedPlayerIds.push(playerId);
   // The bottom row is the player-facing, nearest pair in the table layout.
-  return hole.layouts[playerId].slice(2, 4);
+  return hole.layouts[playerId].slice(2, 4).filter((card): card is Card => Boolean(card));
 }
 
 export function drawFromStock(match: MatchState, playerId: string): Card {
@@ -199,6 +198,7 @@ export function replaceLayoutCard(match: MatchState, playerId: string, layoutInd
   }
   const layout = match.hole.layouts[playerId];
   const replaced = layout[layoutIndex];
+  if (!replaced) throw new GolfRuleError("Choose a card that is still on the table.");
   layout[layoutIndex] = heldCard.card;
   match.hole.discard.push(replaced);
   match.hole.heldCard = undefined;
@@ -245,6 +245,7 @@ export function resolvePeekPower(match: MatchState, playerId: string, target: La
     throw new GolfRuleError("A Jack can only look at one of your own cards.");
   }
   const card = match.hole.layouts[target.playerId][target.layoutIndex];
+  if (!card) throw new GolfRuleError("Choose a card that is still on the table.");
   match.hole.pendingPower = undefined;
   endTurn(match, playerId);
   return card;
@@ -273,11 +274,14 @@ export function matchDiscard(match: MatchState, playerId: string, layoutIndex: n
   const topDiscard = match.hole.discard.at(-1);
   if (!topDiscard) throw new GolfRuleError("The discard pile is empty.");
   const claimedCard = match.hole.layouts[target.playerId][target.layoutIndex];
+  if (!claimedCard) throw new GolfRuleError("Choose a card that is still on the table.");
   if (claimedCard.rank !== topDiscard.rank) {
     return { correct: false };
   }
 
-  const matched = match.hole.layouts[playerId].splice(layoutIndex, 1)[0];
+  const matched = match.hole.layouts[playerId][layoutIndex];
+  if (!matched) throw new GolfRuleError("Choose a card that is still on the table.");
+  match.hole.layouts[playerId][layoutIndex] = null;
   match.hole.discard.push(matched);
   return { correct: true, discarded: matched };
 }
@@ -294,9 +298,12 @@ export function claimOpponentMatch(match: MatchState, playerId: string, target: 
   const topDiscard = match.hole.discard.at(-1);
   if (!topDiscard) throw new GolfRuleError("The discard pile is empty.");
   const claimedCard = match.hole.layouts[target.playerId][target.layoutIndex];
+  if (!claimedCard) throw new GolfRuleError("Choose a card that is still on the table.");
   if (claimedCard.rank !== topDiscard.rank) return { correct: false };
 
-  const matchedCard = match.hole.layouts[target.playerId].splice(target.layoutIndex, 1)[0];
+  const matchedCard = match.hole.layouts[target.playerId][target.layoutIndex];
+  if (!matchedCard) throw new GolfRuleError("Choose a card that is still on the table.");
+  match.hole.layouts[target.playerId][target.layoutIndex] = null;
   match.hole.pendingMatchGift = { playerId, targetPlayerId: target.playerId, targetLayoutIndex: target.layoutIndex, matchedCard };
   return { correct: true };
 }
@@ -308,8 +315,10 @@ export function giveMatchCard(match: MatchState, playerId: string, layoutIndex: 
   const pendingGift = match.hole.pendingMatchGift;
   if (!pendingGift || pendingGift.playerId !== playerId) throw new GolfRuleError("There is no matching-card gift waiting for you.");
   assertLayoutReference(match, { playerId, layoutIndex });
-  const given = match.hole.layouts[playerId].splice(layoutIndex, 1)[0];
-  match.hole.layouts[pendingGift.targetPlayerId].splice(pendingGift.targetLayoutIndex, 0, given);
+  const given = match.hole.layouts[playerId][layoutIndex];
+  if (!given) throw new GolfRuleError("Choose a card that is still on the table.");
+  match.hole.layouts[playerId][layoutIndex] = null;
+  match.hole.layouts[pendingGift.targetPlayerId][pendingGift.targetLayoutIndex] = given;
   match.hole.discard.push(pendingGift.matchedCard);
   match.hole.pendingMatchGift = undefined;
 }
@@ -320,11 +329,25 @@ export function knock(match: MatchState, playerId: string): void {
   assertInitialPeekComplete(match);
   if (match.hole.heldCard) throw new GolfRuleError("Finish the current draw before knocking.");
   if (match.hole.pendingMatchGift) throw new GolfRuleError("Finish the matching-card gift before knocking.");
+  if (match.hole.knockerId) {
+    endTurn(match, playerId);
+    return;
+  }
   const finalTurnQueue = turnOrderAfter(match.players, match.hole.currentPlayerIndex)
     .filter((candidateId) => !isEliminated(match, candidateId));
   match.hole.knockerId = playerId;
   match.hole.finalTurnQueue = finalTurnQueue;
   match.hole.currentPlayerIndex = match.players.findIndex((player) => player.id === finalTurnQueue[0]);
+}
+
+export function finalizeKnock(match: MatchState, now = Date.now()): void {
+  assertPlaying(match);
+  const deadline = match.hole.finalMatchDeadline;
+  if (!deadline) throw new GolfRuleError("The final matching window has not started.");
+  if (now < deadline) throw new GolfRuleError("The final matching window is still open.");
+  if (match.hole.pendingMatchGift) throw new GolfRuleError("Finish the matching-card gift before scoring.");
+  match.hole.finalMatchDeadline = undefined;
+  scoreHole(match);
 }
 
 export function scoreHole(match: MatchState): Record<string, number> {
@@ -411,7 +434,7 @@ export function removePlayer(match: MatchState, playerId: string): { remainingPl
   }
   if (hole.pendingMatchGift?.playerId === playerId) {
     const pendingGift = hole.pendingMatchGift;
-    hole.layouts[pendingGift.targetPlayerId].splice(pendingGift.targetLayoutIndex, 0, pendingGift.matchedCard);
+    hole.layouts[pendingGift.targetPlayerId][pendingGift.targetLayoutIndex] = pendingGift.matchedCard;
     hole.pendingMatchGift = undefined;
   } else if (hole.pendingMatchGift?.targetPlayerId === playerId) {
     hole.pendingMatchGift = undefined;
@@ -456,7 +479,7 @@ export function removePlayer(match: MatchState, playerId: string): { remainingPl
   if (hole.status === "playing") {
     if (hole.finalTurnQueue) {
       if (hole.finalTurnQueue.length === 0) {
-        scoreHole(match);
+        hole.finalMatchDeadline ??= Date.now() + 5_000;
       } else {
         hole.currentPlayerIndex = match.players.findIndex((player) => player.id === hole.finalTurnQueue?.[0]);
       }
@@ -479,7 +502,7 @@ function endTurn(match: MatchState, playerId: string): void {
     if (hole.finalTurnQueue[0] !== playerId) throw new GolfRuleError("Unexpected final turn player.");
     hole.finalTurnQueue.shift();
     if (hole.finalTurnQueue.length === 0) {
-      scoreHole(match);
+      hole.finalMatchDeadline = Date.now() + 5_000;
       return;
     }
     hole.currentPlayerIndex = players.findIndex((player) => player.id === hole.finalTurnQueue?.[0]);
@@ -528,6 +551,9 @@ function assertInitialPeekComplete(match: MatchState): void {
 }
 
 function assertMatchingAvailable(match: MatchState): void {
+  if (match.hole.finalMatchDeadline && Date.now() >= match.hole.finalMatchDeadline) {
+    throw new GolfRuleError("The final matching window has closed.");
+  }
   if (match.hole.heldCard || match.hole.pendingPower || match.hole.pendingMatchGift) {
     throw new GolfRuleError("Finish the current play before calling a match.");
   }
@@ -593,4 +619,5 @@ function assertLayoutReference(match: MatchState, reference: LayoutCardReference
   if (!Number.isInteger(reference.layoutIndex) || reference.layoutIndex < 0 || reference.layoutIndex >= layout.length) {
     throw new GolfRuleError("Choose a card that is still on the table.");
   }
+  if (!layout[reference.layoutIndex]) throw new GolfRuleError("Choose a card that is still on the table.");
 }
