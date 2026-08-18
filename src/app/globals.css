@@ -28,3 +28,72 @@
 .final-match-call { position:relative; left:50%; width:max-content; transform:translateX(-50%); white-space:nowrap; }.final-match-call strong { margin:0; font-size:9px; }
 .joker-card { position:relative; display:block; overflow:hidden; padding:0; }.joker-card.black { color:#17221e; }.joker-word { position:absolute; inset:0; }.game-face-card .joker-word i { position:absolute; display:block; font:clamp(4px,.55em,7px) "Press Start 2P"; line-height:1; }.joker-word i:nth-child(1) { top:9%; left:8%; }.joker-word i:nth-child(2) { top:26%; left:24%; }.joker-word i:nth-child(3) { top:43%; left:40%; }.joker-word i:nth-child(4) { top:60%; left:56%; }.joker-word i:nth-child(5) { top:77%; left:72%; }
 .circular-table .layout-cards { transform:none; }
+
+/* Phone layouts: retain the circular table while keeping every seat and control on screen. */
+@media (max-width:620px) {
+  body { min-width:0; overflow-x:hidden; }
+  .dashboard-shell { min-height:100dvh; }
+  .games-grid { grid-template-columns:1fr; gap:16px; padding:16px; }
+  .game-square { min-height:0; aspect-ratio:1.25 / 1; }
+  .empty-state { position:relative; top:auto; left:auto; transform:none; margin:0 auto; padding:42px 0; }
+  .table-preview { transform:scale(.75); margin:-33px auto -22px; }
+  .game-modal, .table-entry { max-height:calc(100dvh - 28px); overflow-y:auto; padding:24px 18px; }
+  .modal-backdrop { align-items:start; overflow-y:auto; padding:14px; }
+  .game-modal h2, .table-entry h1 { font-size:15px; }
+  .game-screen { min-height:100dvh; padding:8px; overflow-x:hidden; }
+  .game-header { min-height:56px; padding:8px; gap:7px; grid-template-columns:minmax(62px, .75fr) minmax(0, 1fr) minmax(72px, .9fr); display:grid; }
+  .game-header .back-link, .copy-game-link { font-size:6px; line-height:1.5; }
+  .copy-game-link { padding:8px 5px; }
+  .game-header strong { font-size:8px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .game-invite-code { font-size:13px !important; letter-spacing:2px; }
+  .start-panel { margin:32px auto; padding:26px 18px; box-shadow:5px 5px 0 var(--coral); }
+  .start-panel h1 { font-size:16px; }
+  .waiting-players { margin:20px 0; }
+  .waiting-players span { font-size:8px; padding:8px; }
+  .table-status { margin:10px 2px 0; justify-content:center; text-align:center; font-size:7px; }
+  .scoreboard { margin-top:8px; }
+  .scoreboard > span { width:100%; min-width:0; padding:7px; }
+  .scoreboard > div { flex:1 1 30%; min-width:0; padding:6px 4px; }
+  .scoreboard b { font-size:6px; }
+  .scoreboard strong { font-size:16px; }
+  .digital-table.circular-table { width:100%; min-height:0; aspect-ratio:1 / 1; margin:10px auto; border-width:8px; outline-width:2px; box-shadow:inset 0 0 0 2px #082c20,inset 0 0 0 18px #0d3d2d,0 5px 0 #061d16; }
+  .digital-table.circular-table:before { inset:11%; }
+  .center-table { width:128px; }
+  .center-piles { gap:9px; }
+  .center-piles p { font-size:5px; }
+  .center-piles .stock-card, .center-piles .game-face-card { width:37px; height:51px; border-width:2px; font-size:9px; box-shadow:2px 2px 0 #061d16; }
+  .center-piles .game-face-card i { font-size:11px; }
+  .table-activity { margin-top:8px; padding:5px 6px; border-width:1px; box-shadow:2px 2px 0 #061d16; }
+  .table-activity span, .table-activity small { font-size:4px; }
+  .table-activity strong { margin:3px 0; font-size:5px; line-height:1.4; }
+  .circular-table .table-seat { width:82px; min-height:61px; padding:4px; box-shadow:2px 2px 0 #061d16; }
+  .circular-table .table-seat header { min-height:12px; font-size:5px; line-height:1.3; }
+  .circular-table .table-seat header span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .circular-table .layout-cards { grid-template-columns:repeat(2,26px); gap:2px; margin-top:3px; }
+  .circular-table .game-card-back, .circular-table .game-face-card, .circular-table .empty-card-slot { width:26px; height:37px; padding:2px; border-width:2px; box-shadow:1px 1px 0 #061d16; font-size:7px; }
+  .circular-table .game-face-card i { font-size:9px; }
+  .circular-table .presence-dot { width:4px; height:4px; margin-right:2px; }
+  .circular-table .disconnect-countdown { display:none; }
+  .seating-compact .table-seat, .seating-dense .table-seat { width:70px; min-height:54px; padding:3px; }
+  .seating-compact .table-seat header, .seating-dense .table-seat header { min-height:10px; font-size:4px; }
+  .seating-compact .layout-cards, .seating-dense .layout-cards { grid-template-columns:repeat(2,21px); gap:1px; margin-top:2px; }
+  .seating-compact .game-card-back, .seating-compact .game-face-card, .seating-compact .empty-card-slot, .seating-dense .game-card-back, .seating-dense .game-face-card, .seating-dense .empty-card-slot { width:21px; height:30px; padding:1px; border-width:1px; font-size:5px; box-shadow:1px 1px 0 #061d16; }
+  .seating-compact .game-face-card i, .seating-dense .game-face-card i { font-size:7px; }
+  .turn-controls { min-height:72px; margin:12px auto; gap:8px; }
+  .start-panel button, .turn-controls > button, .peek-overlay button { padding:11px 8px; font-size:7px; }
+  .turn-controls > p { font-size:13px; padding:0 8px; }
+  .held-card { justify-content:center; width:100%; font-size:6px; }
+  .held-card .game-face-card { width:39px; height:54px; }
+  .knock-banner { margin-top:5px; font-size:6px; }
+  .knock-banner span { padding:8px 18px; }
+  .tie-break-results { gap:6px; padding:7px; }
+  .tie-break-results > b, .tie-break-results small { font-size:5px; }
+  .leave-game-overlay { padding:14px; }
+  .leave-game-overlay section { padding:25px 15px; }
+  .leave-game-overlay h2 { font-size:14px; }
+  .leave-game-overlay button { font-size:7px; padding:11px 8px; }
+}
+
+@media (display-mode:standalone) {
+  .dashboard-shell, .game-screen, .game-loading { min-height:100dvh; }
+}

@@ -1,0 +1,3 @@
+timis-golf.duckdns.org {
+    reverse_proxy fairway-four:3000
+}

@@ -33,6 +33,7 @@ export default function GamePage() {
   const [leaveConfirmation, setLeaveConfirmation] = useState(false);
   const [finalSeconds, setFinalSeconds] = useState(0);
   const [peekClosing, setPeekClosing] = useState(false);
+  const [isMobileTable, setIsMobileTable] = useState(false);
   const isLeaving = useRef(false);
   const peekClosingRef = useRef(false);
   const peekCloseTimer = useRef<number>(undefined);
@@ -114,6 +115,14 @@ export default function GamePage() {
     const timer = window.setInterval(() => setPresenceNow(Date.now()), 250);
     return () => window.clearInterval(timer);
   }, [disconnectDeadlines]);
+
+  useEffect(() => {
+    const mediaQuery = window.matchMedia("(max-width: 620px)");
+    const update = () => setIsMobileTable(mediaQuery.matches);
+    update();
+    mediaQuery.addEventListener("change", update);
+    return () => mediaQuery.removeEventListener("change", update);
+  }, []);
 
   useEffect(() => {
     const deadline = view?.game?.finalMatchDeadline;
@@ -264,7 +273,7 @@ export default function GamePage() {
           <div className="center-piles"><div><p>STOCK</p><div key={game.lastEvent?.type === "draw-stock" ? game.lastEvent.id : "stock"} className={`stock-card ${game.lastEvent?.type === "draw-stock" ? "action-card-highlight" : ""}`}>?</div></div><div><p>DISCARD</p>{game.discard && <span key={["take-discard", "replace", "discard-drawn"].includes(game.lastEvent?.type || "") ? game.lastEvent?.id : "discard"} className={["take-discard", "replace", "discard-drawn"].includes(game.lastEvent?.type || "") ? "action-card-highlight" : ""}><Card card={game.discard} /></span>}</div></div>
           {game.finalMatchDeadline ? <div className="table-activity final-match-call"><strong>FINAL CALL TO MATCH THE DISCARD - {finalSeconds}S</strong></div> : <div className="table-activity" key={game.lastEvent?.id || "opening-play"}><span>TABLE FEED</span><strong>{game.lastEvent?.message || "Cards are on the table."}</strong><small>{game.currentPlayerName ? `${game.currentPlayerName.toUpperCase()} IS UP` : "WAITING FOR THE NEXT PLAY"}</small></div>}
         </div>
-        {seatedPlayers.map((player, index) => <article className={`table-player table-seat ${player.isYou ? "is-you" : ""} ${player.isOut ? "is-out" : ""} ${game.lastEvent?.playerId === player.id && ["peek", "knock"].includes(game.lastEvent.type || "") ? "action-player-highlight" : ""}`} style={seatPosition(index, seatedPlayers.length)} key={player.id}><header><span><i className={`presence-dot ${connectedPlayerIds.has(player.id) ? "online" : ""}`} />{player.name}{player.isYou ? " (YOU)" : ""}</span>{player.isOut ? <b>OUT</b> : player.score !== undefined && <b>{player.score} PTS</b>}</header>{disconnectDeadlines[player.id] && <small className="disconnect-countdown">DISCONNECTED… REMOVING IN {Math.max(0, Math.ceil((disconnectDeadlines[player.id] - presenceNow) / 1_000))}S</small>}<div className="layout-cards">{player.cards.map((card, cardIndex) => {
+        {seatedPlayers.map((player, index) => <article className={`table-player table-seat ${player.isYou ? "is-you" : ""} ${player.isOut ? "is-out" : ""} ${game.lastEvent?.playerId === player.id && ["peek", "knock"].includes(game.lastEvent.type || "") ? "action-player-highlight" : ""}`} style={seatPosition(index, seatedPlayers.length, isMobileTable)} key={player.id}><header><span><i className={`presence-dot ${connectedPlayerIds.has(player.id) ? "online" : ""}`} />{player.name}{player.isYou ? " (YOU)" : ""}</span>{player.isOut ? <b>OUT</b> : player.score !== undefined && <b>{player.score} PTS</b>}</header>{disconnectDeadlines[player.id] && <small className="disconnect-countdown">DISCONNECTED… REMOVING IN {Math.max(0, Math.ceil((disconnectDeadlines[player.id] - presenceNow) / 1_000))}S</small>}<div className="layout-cards">{player.cards.map((card, cardIndex) => {
           const replacement = game.lastEvent?.type === "replace" && game.lastEvent.playerId === player.id && game.lastEvent.layoutIndex === cardIndex;
           const peekedCard = game.lastEvent?.type === "peek" && game.lastEvent.playerId === player.id && cardIndex >= 2;
           const powerAffected = game.lastEvent?.affectedCards?.some((affected) => affected.playerId === player.id && affected.layoutIndex === cardIndex);
@@ -313,10 +322,10 @@ function arrangeSeats<T extends { isYou: boolean }>(players: T[]): T[] {
   return [...players.slice(yourIndex), ...players.slice(0, yourIndex)];
 }
 
-function seatPosition(index: number, total: number): CSSProperties {
+function seatPosition(index: number, total: number, mobile = false): CSSProperties {
   const degrees = 90 + (index * 360) / total;
   const angle = (degrees * Math.PI) / 180;
-  const radiusX = total > 8 ? 43 : total > 5 ? 40 : 36;
-  const radiusY = total > 8 ? 40 : total > 5 ? 37 : 33;
+  const radiusX = mobile ? total > 8 ? 34 : total > 5 ? 32 : 31 : total > 8 ? 43 : total > 5 ? 40 : 36;
+  const radiusY = mobile ? total > 8 ? 32 : total > 5 ? 30 : 28 : total > 8 ? 40 : total > 5 ? 37 : 33;
   return { left: `${50 + Math.cos(angle) * radiusX}%`, top: `${50 + Math.sin(angle) * radiusY}%` };
 }
