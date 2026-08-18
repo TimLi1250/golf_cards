@@ -12,8 +12,8 @@ export default function manifest(): MetadataRoute.Manifest {
     theme_color: "#0b2c24",
     orientation: "any",
     icons: [
-      { src: "/icon", sizes: "512x512", type: "image/png", purpose: "any" },
-      { src: "/icon", sizes: "512x512", type: "image/png", purpose: "maskable" },
+      { src: "/golf-app-icon.png", sizes: "1024x1024", type: "image/png", purpose: "any" },
+      { src: "/golf-app-icon.png", sizes: "1024x1024", type: "image/png", purpose: "maskable" },
     ],
   };
 }

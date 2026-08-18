@@ -227,7 +227,7 @@ export default function GamePage() {
     setError("");
   }
 
-  if (!view && needsEntry) return <main className="game-loading"><section className="table-entry"><p>TABLE INVITE</p><h1>ENTER GAME</h1><form onSubmit={joinTable}><label>YOUR NAME<input autoFocus value={entryName} maxLength={24} onChange={(event) => setEntryName(event.target.value)} placeholder="Guest" /></label><button type="submit">ENTER TABLE →</button></form>{error && <p className="table-entry-error">{error}</p>}</section></main>;
+  if (!view && needsEntry) return <main className="game-loading"><section className="table-entry"><p>TABLE INVITE</p><h1>ENTER GAME</h1><button type="button" className="entry-back-button" onClick={() => router.push("/")}>← BACK TO LOBBY</button><form onSubmit={joinTable}><label>YOUR NAME<input autoFocus value={entryName} maxLength={24} onChange={(event) => setEntryName(event.target.value)} placeholder="Guest" /></label><button type="submit">ENTER TABLE →</button></form>{error && <p className="table-entry-error">{error}</p>}</section></main>;
   if (!view) return <main className="game-loading"><p>CONNECTING TO TABLE…</p>{error && <small>{error}</small>}</main>;
   const game = view.game;
   const seatedPlayers = game ? arrangeSeats(game.players) : [];

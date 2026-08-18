@@ -97,3 +97,6 @@
 @media (display-mode:standalone) {
   .dashboard-shell, .game-screen, .game-loading { min-height:100dvh; }
 }
+
+.table-entry .entry-back-button { width:auto; margin:0 0 10px; padding:0; border:0; background:transparent; color:var(--forest); box-shadow:none; font:8px "Press Start 2P"; }
+.table-entry .entry-back-button:hover { color:var(--coral); transform:none; }
