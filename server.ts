@@ -2,6 +2,7 @@ import { createServer } from "node:http";
 import next from "next";
 import { Server } from "socket.io";
 import { publishLobbyUpdate, publishRoomUpdate, roomEvents } from "./src/lib/realtime/room-events";
+import { clearDisconnectDeadline, roomDisconnectDeadlines, setDisconnectDeadline } from "./src/lib/realtime/disconnect-state";
 import { persistentRoomRegistry } from "./src/lib/rooms/sqlite-registry";
 
 async function bootstrap() {
@@ -13,6 +14,48 @@ async function bootstrap() {
   await app.prepare();
   const httpServer = createServer(handler);
   const io = new Server(httpServer, { path: "/socket.io" });
+  const disconnectTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  const disconnectKey = (inviteCode: string, playerId: string) => `${inviteCode}:${playerId}`;
+
+  const cancelDisconnectRemoval = (inviteCode: string, playerId: string) => {
+    const key = disconnectKey(inviteCode, playerId);
+    const timer = disconnectTimers.get(key);
+    if (timer) clearTimeout(timer);
+    disconnectTimers.delete(key);
+    clearDisconnectDeadline(inviteCode, playerId);
+  };
+
+  const scheduleDisconnectRemoval = (room: string, playerId: string, excludedSocketId?: string, force = false) => {
+    const inviteCode = room.slice("room:".length);
+    const stillConnected = [...io.sockets.sockets.values()].some((candidate) =>
+      candidate.id !== excludedSocketId && candidate.rooms.has(room) && candidate.data.playerId === playerId,
+    );
+    if (stillConnected && !force) return;
+
+    cancelDisconnectRemoval(inviteCode, playerId);
+    const key = disconnectKey(inviteCode, playerId);
+    setDisconnectDeadline(inviteCode, playerId, Date.now() + 30_000);
+    disconnectTimers.set(key, setTimeout(() => {
+      disconnectTimers.delete(key);
+      clearDisconnectDeadline(inviteCode, playerId);
+      const reconnected = [...io.sockets.sockets.values()].some((candidate) =>
+        candidate.rooms.has(room) && candidate.data.playerId === playerId,
+      );
+      if (reconnected) return;
+      try {
+        const result = persistentRoomRegistry().leave(inviteCode, playerId);
+        if (result.left) {
+          publishRoomUpdate(inviteCode);
+          publishLobbyUpdate();
+        }
+      } catch (error) {
+        if (!(error instanceof Error && error.message === "No open table was found with that invite code.")) {
+          console.error(`Unable to remove disconnected player from ${inviteCode}:`, error);
+        }
+      }
+      broadcastPresence(io, room);
+    }, 30_000));
+  };
 
   io.on("connection", (socket) => {
     socket.on("identify", (identity: PlayerIdentity | string) => {
@@ -27,14 +70,19 @@ async function bootstrap() {
       broadcastLobbyPresence(io);
     });
     socket.on("watch:room", (inviteCode: string) => {
-      const room = `room:${inviteCode.toUpperCase()}`;
+      const normalizedInviteCode = inviteCode.toUpperCase();
+      const room = `room:${normalizedInviteCode}`;
+      if (typeof socket.data.playerId === "string") cancelDisconnectRemoval(normalizedInviteCode, socket.data.playerId);
       socket.join(room);
       broadcastPresence(io, room);
       broadcastLobbyPresence(io);
     });
     socket.on("disconnecting", () => {
       for (const room of socket.rooms) {
-        if (room.startsWith("room:")) broadcastPresence(io, room, socket.id);
+        if (room.startsWith("room:") && typeof socket.data.playerId === "string") {
+          scheduleDisconnectRemoval(room, socket.data.playerId, socket.id);
+          broadcastPresence(io, room, socket.id);
+        }
       }
       broadcastLobbyPresence(io, socket.id);
     });
@@ -43,6 +91,15 @@ async function bootstrap() {
   roomEvents.on("lobby:update", () => io.to("lobby").emit("lobby:update"));
   roomEvents.on("room:update", (inviteCode: string) => io.to(`room:${inviteCode}`).emit("room:update"));
   roomEvents.on("presence:update", (inviteCode: string, playerIds: string[]) => io.to(`room:${inviteCode}`).emit("presence:update", playerIds));
+  roomEvents.on("disconnect:begin", (inviteCode: string, playerId: string, departingSocketId?: string) => {
+    const room = `room:${inviteCode}`;
+    const newerConnectionExists = [...io.sockets.sockets.values()].some((candidate) =>
+      candidate.rooms.has(room) && candidate.data.playerId === playerId && candidate.id !== departingSocketId,
+    );
+    if (newerConnectionExists) return;
+    scheduleDisconnectRemoval(room, playerId, departingSocketId, true);
+    broadcastPresence(io, room, departingSocketId);
+  });
 
   const emptyTableSweep = setInterval(() => {
     const registry = persistentRoomRegistry();
@@ -98,5 +155,7 @@ function broadcastPresence(io: Server, room: string, excludedSocketId?: string) 
   const playerIds = [...io.sockets.sockets.values()]
     .filter((socket) => socket.id !== excludedSocketId && socket.rooms.has(room) && typeof socket.data.playerId === "string")
     .map((socket) => socket.data.playerId as string);
-  io.to(room).emit("presence:update", [...new Set(playerIds)]);
+  const inviteCode = room.slice("room:".length);
+  const disconnectDeadlines = roomDisconnectDeadlines(inviteCode);
+  io.to(room).emit("presence:update", { playerIds: [...new Set(playerIds)], disconnectDeadlines });
 }
