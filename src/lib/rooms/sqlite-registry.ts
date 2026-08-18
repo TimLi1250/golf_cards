@@ -5,6 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import {
   discardDrawnStockCard,
   drawFromStock,
+  eliminatePlayer,
   knock,
   matchDiscard,
   peekInitialCards,
@@ -246,7 +247,8 @@ export class SqliteRoomRegistry {
     const currentEnginePlayer = match.players[match.hole.currentPlayerIndex];
     const currentIndex = currentEnginePlayer ? match.players.findIndex((player) => player.id === currentEnginePlayer.id) : -1;
     const currentRoomPlayer = players[currentIndex];
-    const isPeeking = match.status === "playing" && match.hole.status === "playing" && match.hole.peekedPlayerIds.length < match.players.length;
+    const activeEnginePlayers = match.players.filter((player) => !match.eliminatedPlayerIds?.includes(player.id));
+    const isPeeking = match.status === "playing" && match.hole.status === "playing" && activeEnginePlayers.some((player) => !match.hole.peekedPlayerIds.includes(player.id));
     const viewerCanAct = match.status === "playing" && !isPeeking && match.hole.status === "playing" && currentEnginePlayer?.id === viewerEngineId;
     const pendingPower = match.hole.pendingPower;
     const pendingPowerIndex = pendingPower ? match.players.findIndex((player) => player.id === pendingPower.playerId) : -1;
@@ -257,6 +259,7 @@ export class SqliteRoomRegistry {
         id: player.id,
         name: player.name,
         isYou: player.id === playerId,
+        isOut: match.eliminatedPlayerIds?.includes(enginePlayerId) ?? false,
         cardCount: layout.length,
         cards: layout.map((card) => (revealed ? publicCard(card) : null)),
         totalScore: match.players[index]?.totalScore || 0,
@@ -274,16 +277,22 @@ export class SqliteRoomRegistry {
         holeNumber: match.hole.number,
         holesToPlay: match.holesToPlay,
         phase,
-        lostPlayerName: match.lostPlayerId ? match.players.find((player) => player.id === match.lostPlayerId)?.name : undefined,
+        holeWinnerName: match.hole.winnerId ? match.players.find((player) => player.id === match.hole.winnerId)?.name : undefined,
+        tieBreakRounds: match.hole.tieBreakRounds?.length || 0,
+        tieBreaks: match.hole.tieBreakRounds?.map((round) => round.map(({ playerId: tieBreakPlayerId, card }) => ({
+          playerName: match.players.find((player) => player.id === tieBreakPlayerId)?.name || "A player",
+          card: publicCard(card),
+        }))),
         currentPlayerId: currentRoomPlayer?.id,
         currentPlayerName: currentRoomPlayer?.name,
         stockCount: match.hole.stock.length,
         discard: publicCard(discard),
         heldCard: viewerCanAct && match.hole.heldCard ? publicCard(match.hole.heldCard.card) : undefined,
         isPeeking,
-        peekedPlayers: match.hole.peekedPlayerIds.length,
+        peekedPlayers: match.hole.peekedPlayerIds.filter((id) => activeEnginePlayers.some((player) => player.id === id)).length,
+        activePlayerCount: activeEnginePlayers.length,
         heldCardSource: viewerCanAct ? match.hole.heldCard?.source : undefined,
-        canPeek: match.status === "playing" && match.hole.status === "playing" && viewerEngineId ? !match.hole.peekedPlayerIds.includes(viewerEngineId) : false,
+        canPeek: match.status === "playing" && match.hole.status === "playing" && viewerEngineId && !match.eliminatedPlayerIds?.includes(viewerEngineId) ? !match.hole.peekedPlayerIds.includes(viewerEngineId) : false,
         canAct: viewerCanAct,
         pendingPower: pendingPower && pendingPowerIndex >= 0 ? {
           rank: pendingPower.rank,
@@ -291,7 +300,7 @@ export class SqliteRoomRegistry {
           playerName: match.players[pendingPowerIndex]?.name || "A player",
         } : undefined,
         canUsePower: viewerCanAct && pendingPower?.playerId === viewerEngineId,
-        canMatch: match.status === "playing" && !isPeeking && match.hole.status === "playing" && !match.hole.heldCard && !pendingPower && Boolean(viewerEngineId && match.hole.layouts[viewerEngineId]?.length),
+        canMatch: match.status === "playing" && !isPeeking && match.hole.status === "playing" && !match.hole.heldCard && !pendingPower && Boolean(viewerEngineId && !match.eliminatedPlayerIds?.includes(viewerEngineId) && match.hole.layouts[viewerEngineId]?.length),
         knockerName: match.hole.knockerId ? match.players.find((player) => player.id === match.hole.knockerId)?.name : undefined,
         lastEvent: match.lastEvent,
         players: viewPlayers,
@@ -352,7 +361,12 @@ export class SqliteRoomRegistry {
       case "match-own": {
         const result = matchDiscard(match, enginePlayerId, { playerId: enginePlayerId, layoutIndex: action.layoutIndex });
         eventType = "match-own";
-        eventMessage = result.correct ? `${players[playerIndex]?.name || "A player"} matched the discard and lost a card.` : `${players[playerIndex]?.name || "A player"} called a wrong match and lost the game.`;
+        let elimination;
+        if (!result.correct) {
+          elimination = eliminatePlayer(match, enginePlayerId);
+        }
+        const winnerName = elimination?.winnerId ? match.players.find((player) => player.id === elimination.winnerId)?.name || "The remaining player" : "";
+        eventMessage = result.correct ? `${players[playerIndex]?.name || "A player"} matched the discard and lost a card.` : elimination?.advanced ? `${players[playerIndex]?.name || "A player"} called a wrong match. ${winnerName} wins the hole — next hole starts now.` : `${players[playerIndex]?.name || "A player"} called a wrong match and is out of the game.`;
         affectedCards = [{ playerId: roomPlayerId, layoutIndex: action.layoutIndex }];
         break;
       }
@@ -360,7 +374,12 @@ export class SqliteRoomRegistry {
         const result = matchDiscard(match, enginePlayerId, engineReference(action.targetPlayerId, action.targetLayoutIndex), { playerId: enginePlayerId, layoutIndex: action.giftLayoutIndex });
         eventType = "match-other";
         const targetName = players.find((player) => player.id === action.targetPlayerId)?.name || "another player";
-        eventMessage = result.correct ? `${players[playerIndex]?.name || "A player"} matched ${targetName}'s card and handed one over.` : `${players[playerIndex]?.name || "A player"} called ${targetName}'s card wrong and lost the game.`;
+        let elimination;
+        if (!result.correct) {
+          elimination = eliminatePlayer(match, enginePlayerId);
+        }
+        const winnerName = elimination?.winnerId ? match.players.find((player) => player.id === elimination.winnerId)?.name || "The remaining player" : "";
+        eventMessage = result.correct ? `${players[playerIndex]?.name || "A player"} matched ${targetName}'s card and handed one over.` : elimination?.advanced ? `${players[playerIndex]?.name || "A player"} called ${targetName}'s card wrong. ${winnerName} wins the hole — next hole starts now.` : `${players[playerIndex]?.name || "A player"} called ${targetName}'s card wrong and is out of the game.`;
         affectedCards = [{ playerId: action.targetPlayerId, layoutIndex: action.targetLayoutIndex }, { playerId: roomPlayerId, layoutIndex: action.giftLayoutIndex }];
         break;
       }
@@ -369,9 +388,11 @@ export class SqliteRoomRegistry {
     }
     const playerName = players[playerIndex]?.name || "A player";
     const everyonePeeked = action.type === "peek" && match.hole.peekedPlayerIds.length === match.players.length;
+    const holeWinner = match.hole.winnerId ? match.players.find((player) => player.id === match.hole.winnerId)?.name || "A player" : undefined;
+    const completedHoleMessage = holeWinner ? `${holeWinner} wins the hole${match.hole.tieBreakRounds?.length ? ` after ${match.hole.tieBreakRounds.length} tie-break round${match.hole.tieBreakRounds.length === 1 ? "" : "s"}` : ""}.` : undefined;
     const message = everyonePeeked
       ? `Everyone has peeked. ${match.players[match.hole.currentPlayerIndex]?.name || "The next player"} starts.`
-      : eventMessage || actionMessage(playerName, action);
+      : completedHoleMessage || eventMessage || actionMessage(playerName, action);
     match.lastEvent = { id: eventId(), message, playerId: roomPlayerId, type: eventType, layoutIndex: action.type === "replace" ? action.layoutIndex : undefined, affectedCards };
     this.saveMatch(room.id, match);
     return { view: this.gameView(inviteCode, roomPlayerId), privatePeek, privatePowerPeek };
@@ -456,6 +477,7 @@ export class SqliteRoomRegistry {
     }
   }
 
+
   private nextInviteCode(requestedCode?: string): string {
     const requested = requestedCode?.trim().toUpperCase();
     if (requested) {
@@ -507,7 +529,7 @@ declare global {
 }
 
 export function persistentRoomRegistry(): SqliteRoomRegistry {
-  const registryVersion = 12;
+  const registryVersion = 16;
   if (globalThis.fairwayFourRoomRegistryVersion !== registryVersion || !globalThis.fairwayFourRoomRegistry) {
     const oldRegistry = globalThis.fairwayFourRoomRegistry as { close?: unknown } | undefined;
     if (typeof oldRegistry?.close === "function") oldRegistry.close();

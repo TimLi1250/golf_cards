@@ -41,6 +41,8 @@ export type HoleState = {
   finalTurnQueue?: string[];
   status: "playing" | "scored";
   scores?: Record<string, number>;
+  winnerId?: string;
+  tieBreakRounds?: { playerId: string; card: Card }[][];
 };
 
 export type MatchState = {
@@ -48,7 +50,7 @@ export type MatchState = {
   hole: HoleState;
   holesToPlay: number;
   status: "playing" | "finished";
-  lostPlayerId?: string;
+  eliminatedPlayerIds?: string[];
   lastEvent?: MatchEvent;
 };
 
@@ -154,7 +156,7 @@ export function currentPlayer(match: MatchState): Player {
 export function peekInitialCards(match: MatchState, playerId: string): Card[] {
   assertPlaying(match);
   const { hole } = match;
-  assertPlayer(match, playerId);
+  assertActivePlayer(match, playerId);
   if (hole.peekedPlayerIds.includes(playerId)) {
     throw new GolfRuleError("This player has already used their initial peek.");
   }
@@ -249,8 +251,8 @@ export function skipPower(match: MatchState, playerId: string): void {
 
 /**
  * Plays a face-down layout card against the top discard without using a turn.
- * A correct call removes the matching card. A wrong call immediately ends the
- * match for the caller.
+ * A correct call removes the matching card. The registry removes a player who
+ * makes a wrong call, allowing the remaining players to continue.
  */
 export function matchDiscard(
   match: MatchState,
@@ -260,7 +262,7 @@ export function matchDiscard(
 ): { correct: boolean; discarded?: Card } {
   assertPlaying(match);
   assertInitialPeekComplete(match);
-  assertPlayer(match, playerId);
+  assertActivePlayer(match, playerId);
   if (match.hole.heldCard || match.hole.pendingPower) throw new GolfRuleError("Finish the current play before calling a match.");
   assertLayoutReference(match, target);
   const targetIsOwn = target.playerId === playerId;
@@ -273,8 +275,6 @@ export function matchDiscard(
   if (!topDiscard) throw new GolfRuleError("The discard pile is empty.");
   const claimedCard = match.hole.layouts[target.playerId][target.layoutIndex];
   if (claimedCard.rank !== topDiscard.rank) {
-    match.status = "finished";
-    match.lostPlayerId = playerId;
     return { correct: false };
   }
 
@@ -292,20 +292,29 @@ export function knock(match: MatchState, playerId: string): void {
   assertTurn(match, playerId);
   assertInitialPeekComplete(match);
   if (match.hole.heldCard) throw new GolfRuleError("Finish the current draw before knocking.");
-  const finalTurnQueue = turnOrderAfter(match.players, match.hole.currentPlayerIndex);
+  const finalTurnQueue = turnOrderAfter(match.players, match.hole.currentPlayerIndex)
+    .filter((candidateId) => !isEliminated(match, candidateId));
   match.hole.knockerId = playerId;
   match.hole.finalTurnQueue = finalTurnQueue;
   match.hole.currentPlayerIndex = match.players.findIndex((player) => player.id === finalTurnQueue[0]);
 }
 
 export function scoreHole(match: MatchState): Record<string, number> {
-  const scores = Object.fromEntries(
-    match.players.map((player) => [player.id, scoreLayout(match.hole.layouts[player.id])]),
-  );
-  match.hole.scores = scores;
-  match.hole.status = "scored";
-  for (const player of match.players) player.totalScore += scores[player.id];
-  return scores;
+  const active = activePlayers(match);
+  if (active.length === 0) throw new GolfRuleError("No active players remain to win this hole.");
+  const layoutScores = Object.fromEntries(active.map((player) => [player.id, scoreLayout(match.hole.layouts[player.id])]));
+  const lowestScore = Math.min(...Object.values(layoutScores));
+  let tiedPlayers = active.filter((player) => layoutScores[player.id] === lowestScore);
+  const tieBreakRounds: { playerId: string; card: Card }[][] = [];
+
+  while (tiedPlayers.length > 1) {
+    const round = tiedPlayers.map((player) => ({ playerId: player.id, card: drawTieBreakCard(match) }));
+    tieBreakRounds.push(round);
+    const highestCardScore = Math.max(...round.map(({ card }) => scoreCard(card)));
+    tiedPlayers = tiedPlayers.filter((player) => round.some(({ playerId, card }) => playerId === player.id && scoreCard(card) === highestCardScore));
+  }
+  match.hole.tieBreakRounds = tieBreakRounds.length > 0 ? tieBreakRounds : undefined;
+  return awardHoleWin(match, tiedPlayers[0].id);
 }
 
 export function startNextHole(match: MatchState, random?: () => number): void {
@@ -314,12 +323,51 @@ export function startNextHole(match: MatchState, random?: () => number): void {
     match.status = "finished";
     return;
   }
+  // Being out applies only to the current hole. Every seated player returns
+  // for the next deal.
+  match.eliminatedPlayerIds = undefined;
   match.hole = dealHole(
     match.players,
     match.hole.number + 1,
     (match.hole.dealerIndex + 1) % match.players.length,
     random,
   );
+  match.hole.currentPlayerIndex = nextActivePlayerIndex(match, match.hole.dealerIndex);
+}
+
+/** Keeps an eliminated player visible at the table while removing them from play. */
+export function eliminatePlayer(match: MatchState, playerId: string): { remainingActivePlayers: number; finished: boolean; winnerId?: string; advanced: boolean } {
+  assertPlaying(match);
+  assertActivePlayer(match, playerId);
+  const { hole } = match;
+  match.eliminatedPlayerIds = [...(match.eliminatedPlayerIds ?? []), playerId];
+  if (hole.finalTurnQueue) hole.finalTurnQueue = hole.finalTurnQueue.filter((id) => id !== playerId);
+
+  const remainingActivePlayers = activePlayers(match).length;
+  if (remainingActivePlayers < 2) {
+    const winner = activePlayers(match)[0];
+    if (!winner) {
+      match.status = "finished";
+      return { remainingActivePlayers, finished: true, advanced: false };
+    }
+    awardHoleWin(match, winner.id);
+    if (hole.number >= match.holesToPlay) {
+      match.status = "finished";
+      return { remainingActivePlayers, finished: true, winnerId: winner.id, advanced: false };
+    }
+    startNextHole(match);
+    return { remainingActivePlayers, finished: false, winnerId: winner.id, advanced: true };
+  }
+
+  if (currentPlayer(match).id === playerId) {
+    if (hole.finalTurnQueue) {
+      if (hole.finalTurnQueue.length === 0) scoreHole(match);
+      else hole.currentPlayerIndex = match.players.findIndex((player) => player.id === hole.finalTurnQueue?.[0]);
+    } else {
+      hole.currentPlayerIndex = nextActivePlayerIndex(match, hole.currentPlayerIndex);
+    }
+  }
+  return { remainingActivePlayers, finished: match.status === "finished", advanced: false };
 }
 
 /** Removes a player from an active match while keeping the current hole valid. */
@@ -340,10 +388,11 @@ export function removePlayer(match: MatchState, playerId: string): { remainingPl
   if (hole.scores) delete hole.scores[playerId];
   hole.peekedPlayerIds = hole.peekedPlayerIds.filter((id) => id !== playerId);
   if (hole.knockerId === playerId) hole.knockerId = undefined;
+  match.eliminatedPlayerIds = (match.eliminatedPlayerIds ?? []).filter((id) => id !== playerId);
   if (clearedPendingPower) hole.pendingPower = undefined;
   if (hole.finalTurnQueue) hole.finalTurnQueue = hole.finalTurnQueue.filter((id) => id !== playerId);
 
-  if (match.players.length < 2) {
+  if (activePlayers(match).length < 2) {
     match.status = "finished";
     return { remainingPlayers: match.players.length, finished: true };
   }
@@ -360,6 +409,7 @@ export function removePlayer(match: MatchState, playerId: string): { remainingPl
   hole.layouts = Object.fromEntries(Object.entries(hole.layouts).map(([id, layout]) => [idMap.get(id) ?? id, layout]));
   hole.peekedPlayerIds = hole.peekedPlayerIds.map((id) => idMap.get(id) ?? id);
   if (hole.knockerId) hole.knockerId = idMap.get(hole.knockerId);
+  if (match.eliminatedPlayerIds) match.eliminatedPlayerIds = match.eliminatedPlayerIds.map((id) => idMap.get(id) ?? id);
   if (hole.pendingPower) hole.pendingPower.playerId = idMap.get(hole.pendingPower.playerId) ?? hole.pendingPower.playerId;
   if (hole.finalTurnQueue) hole.finalTurnQueue = hole.finalTurnQueue.map((id) => idMap.get(id) ?? id);
   if (hole.scores) hole.scores = Object.fromEntries(Object.entries(hole.scores).map(([id, score]) => [idMap.get(id) ?? id, score]));
@@ -375,6 +425,9 @@ export function removePlayer(match: MatchState, playerId: string): { remainingPl
       hole.currentPlayerIndex -= 1;
     } else if (leavingIndex === hole.currentPlayerIndex) {
       hole.currentPlayerIndex %= match.players.length;
+    }
+    if (match.status === "playing" && isEliminated(match, currentPlayer(match).id)) {
+      hole.currentPlayerIndex = nextActivePlayerIndex(match, hole.currentPlayerIndex);
     }
   }
 
@@ -393,7 +446,7 @@ function endTurn(match: MatchState, playerId: string): void {
     hole.currentPlayerIndex = players.findIndex((player) => player.id === hole.finalTurnQueue?.[0]);
     return;
   }
-  hole.currentPlayerIndex = (hole.currentPlayerIndex + 1) % players.length;
+  hole.currentPlayerIndex = nextActivePlayerIndex(match, hole.currentPlayerIndex);
 }
 
 function turnOrderAfter(players: Player[], index: number): string[] {
@@ -410,8 +463,13 @@ function assertPlayer(match: MatchState, playerId: string): void {
   if (!match.players.some((player) => player.id === playerId)) throw new GolfRuleError("Unknown player.");
 }
 
-function assertTurn(match: MatchState, playerId: string): void {
+function assertActivePlayer(match: MatchState, playerId: string): void {
   assertPlayer(match, playerId);
+  if (isEliminated(match, playerId)) throw new GolfRuleError("This player is out of the game.");
+}
+
+function assertTurn(match: MatchState, playerId: string): void {
+  assertActivePlayer(match, playerId);
   if (currentPlayer(match).id !== playerId) throw new GolfRuleError("It is not this player's turn.");
 }
 
@@ -424,9 +482,42 @@ function assertCanDraw(match: MatchState, playerId: string): void {
 }
 
 function assertInitialPeekComplete(match: MatchState): void {
-  if (match.hole.peekedPlayerIds.length < match.players.length) {
+  if (activePlayers(match).some((player) => !match.hole.peekedPlayerIds.includes(player.id))) {
     throw new GolfRuleError("Everyone must peek at their cards before the first turn begins.");
   }
+}
+
+function activePlayers(match: MatchState): Player[] {
+  return match.players.filter((player) => !isEliminated(match, player.id));
+}
+
+function awardHoleWin(match: MatchState, winnerId: string): Record<string, number> {
+  const scores = Object.fromEntries(match.players.map((player) => [player.id, player.id === winnerId ? 1 : 0]));
+  match.hole.scores = scores;
+  match.hole.winnerId = winnerId;
+  match.hole.status = "scored";
+  const winner = match.players.find((player) => player.id === winnerId);
+  if (!winner) throw new GolfRuleError("The hole winner is not at this table.");
+  winner.totalScore += 1;
+  return scores;
+}
+
+function drawTieBreakCard(match: MatchState): Card {
+  const card = match.hole.stock.pop() ?? match.hole.discard.pop();
+  if (!card) throw new GolfRuleError("There are no cards left for the tie-break.");
+  return card;
+}
+
+function isEliminated(match: MatchState, playerId: string): boolean {
+  return match.eliminatedPlayerIds?.includes(playerId) ?? false;
+}
+
+function nextActivePlayerIndex(match: MatchState, currentIndex: number): number {
+  for (let offset = 1; offset <= match.players.length; offset += 1) {
+    const index = (currentIndex + offset) % match.players.length;
+    if (!isEliminated(match, match.players[index].id)) return index;
+  }
+  throw new GolfRuleError("No active players remain.");
 }
 
 function resolveDiscardPowerOrEndTurn(match: MatchState, playerId: string, discarded: Card): void {

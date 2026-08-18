@@ -7,7 +7,7 @@ import { io } from "socket.io-client";
 import type { GameAction, GameView, PublicCard } from "../../../lib/golf/protocol";
 import { copyText, playerProfile, savePlayerName } from "../../../lib/player-session";
 
-type GameResponse = { view?: GameView; privatePeek?: PublicCard[]; privatePowerPeek?: { playerId: string; layoutIndex: number; card: PublicCard }; error?: string };
+type GameResponse = { view?: GameView; needsEntry?: boolean; privatePeek?: PublicCard[]; privatePowerPeek?: { playerId: string; layoutIndex: number; card: PublicCard }; error?: string };
 type RecentReplacement = { eventId: string; layoutIndex: number; card: PublicCard };
 type RecentPeek = { eventId: string; cards: PublicCard[] };
 type RecentPowerPeek = { eventId: string; playerId: string; layoutIndex: number; card: PublicCard };
@@ -36,6 +36,10 @@ export default function GamePage() {
     try {
       const response = await fetch(`/api/rooms/${inviteCode}/game?playerId=${playerProfile().id}`, { cache: "no-store" });
       const data = await response.json() as GameResponse;
+      if (data.needsEntry) {
+        setNeedsEntry(true);
+        return setError("");
+      }
       if (!response.ok || !data.view) {
         if (data.error === "Enter this table before viewing it.") {
           setNeedsEntry(true);
@@ -52,10 +56,11 @@ export default function GamePage() {
   }, [inviteCode]);
 
   useEffect(() => {
+    if (needsEntry) return;
     const initialRefresh = window.setTimeout(() => void refreshGame(), 0);
     const refresh = window.setInterval(() => void refreshGame(), 2_000);
     return () => { window.clearTimeout(initialRefresh); window.clearInterval(refresh); };
-  }, [refreshGame]);
+  }, [needsEntry, refreshGame]);
 
   useEffect(() => {
     if (!hasJoinedTable) return;
@@ -171,8 +176,9 @@ export default function GamePage() {
   const game = view.game;
   const seatedPlayers = game ? arrangeSeats(game.players) : [];
 
-  function handleCardClick(playerId: string, isYou: boolean, layoutIndex: number) {
+  function handleCardClick(playerId: string, isYou: boolean, isOut: boolean, layoutIndex: number) {
     if (!game || game.phase !== "playing") return;
+    if (isOut) return;
     if (game.canUsePower && game.pendingPower) {
       if (game.pendingPower.rank === "8") {
         const picked = { playerId, layoutIndex };
@@ -208,14 +214,15 @@ export default function GamePage() {
   return <main className="game-screen">
     <header className="game-header"><Link href="/" className="back-link" onClick={(event) => { event.preventDefault(); if (game) setLeaveConfirmation(true); else void leaveTable(); }}>← LOBBY</Link><div><strong>{view.room.name}</strong><small className="game-invite-code">{view.room.inviteCode}</small></div><button className="copy-game-link" onClick={() => void copyGameLink()}>{linkCopied ? "LINK COPIED" : "COPY GAME LINK"}</button></header>
     {!game ? <section className="start-panel"><p>TABLE LOBBY</p><h1>{view.room.name}</h1><div className="waiting-players">{view.room.players.map((player) => <span key={player.id}>{player.name}</span>)}</div>{view.canStart ? <button onClick={() => sendAction({ type: "start" })}>START GAME →</button> : <p className="wait-copy">Waiting for {view.room.players[0]?.name} to start the game.</p>}{error && <p className="game-error">{error}</p>}</section> : <>
-      <section className="table-status"><span>{game.phase === "finished" ? `GAME OVER — ${game.lostPlayerName || "A PLAYER"} LOST ON A WRONG MATCH` : game.isPeeking ? `PEEK PHASE ${game.peekedPlayers}/${game.players.length}` : game.phase === "scored" ? "HOLE COMPLETE" : game.currentPlayerName === "" ? "" : `${game.currentPlayerName}'S TURN`}</span><span>STOCK {game.stockCount}</span>{game.knockerName && <span>{game.knockerName} KNOCKED</span>}</section>
-      <section className="scoreboard" aria-label="Scoreboard"><span>SCOREBOARD</span>{seatedPlayers.map((player) => <div className={player.isYou ? "is-you" : ""} key={player.id}><b>{player.name}{player.isYou ? " (YOU)" : ""}</b><strong>{player.totalScore}</strong></div>)}</section>
+      <section className="table-status"><span>{game.phase === "finished" ? "GAME OVER" : game.isPeeking ? `PEEK PHASE ${game.peekedPlayers}/${game.activePlayerCount}` : game.phase === "scored" ? `${game.holeWinnerName || "A PLAYER"} WINS${game.tieBreakRounds ? ` AFTER ${game.tieBreakRounds} TIE-BREAK${game.tieBreakRounds > 1 ? "S" : ""}` : ""}` : game.currentPlayerName === "" ? "" : `${game.currentPlayerName}'S TURN`}</span><span>STOCK {game.stockCount}</span>{game.knockerName && <span>{game.knockerName} KNOCKED</span>}</section>
+      {game.phase === "scored" && game.tieBreaks?.map((round, roundIndex) => <section className="tie-break-results" key={roundIndex}><b>TIE BREAK {roundIndex + 1}</b>{round.map(({ playerName, card }) => <span key={`${playerName}-${card.rank}-${card.suit}`}><small>{playerName}</small><Card card={card} /></span>)}</section>)}
+      <section className="scoreboard" aria-label="Scoreboard"><span>HOLE WINS</span>{seatedPlayers.map((player) => <div className={`${player.isYou ? "is-you" : ""} ${player.isOut ? "is-out" : ""}`} key={player.id}><b>{player.name}{player.isYou ? " (YOU)" : ""}</b><strong>{player.isOut ? "OUT" : player.totalScore}</strong></div>)}</section>
       <section className={`digital-table circular-table ${seatedPlayers.length > 8 ? "seating-dense" : seatedPlayers.length > 5 ? "seating-compact" : ""}`}>
         <div className="center-table">
           <div className="center-piles"><div><p>STOCK</p><div key={game.lastEvent?.type === "draw-stock" ? game.lastEvent.id : "stock"} className={`stock-card ${game.lastEvent?.type === "draw-stock" ? "action-card-highlight" : ""}`}>?</div></div><div><p>DISCARD</p><span key={["take-discard", "replace", "discard-drawn"].includes(game.lastEvent?.type || "") ? game.lastEvent?.id : "discard"} className={["take-discard", "replace", "discard-drawn"].includes(game.lastEvent?.type || "") ? "action-card-highlight" : ""}><Card card={game.discard} /></span></div></div>
           <div className="table-activity" key={game.lastEvent?.id || "opening-play"}><span>TABLE FEED</span><strong>{game.lastEvent?.message || "Cards are on the table."}</strong><small>{game.currentPlayerName ? `${game.currentPlayerName.toUpperCase()} IS UP` : "WAITING FOR THE NEXT PLAY"}</small></div>
         </div>
-        {seatedPlayers.map((player, index) => <article className={`table-player table-seat ${player.isYou ? "is-you" : ""} ${game.lastEvent?.playerId === player.id && ["peek", "knock"].includes(game.lastEvent.type || "") ? "action-player-highlight" : ""}`} style={seatPosition(index, seatedPlayers.length)} key={player.id}><header><span><i className={`presence-dot ${connectedPlayerIds.has(player.id) ? "online" : ""}`} />{player.name}{player.isYou ? " (YOU)" : ""}</span>{player.score !== undefined && <b>{player.score} PTS</b>}</header><div className="layout-cards">{player.cards.map((card, cardIndex) => {
+        {seatedPlayers.map((player, index) => <article className={`table-player table-seat ${player.isYou ? "is-you" : ""} ${player.isOut ? "is-out" : ""} ${game.lastEvent?.playerId === player.id && ["peek", "knock"].includes(game.lastEvent.type || "") ? "action-player-highlight" : ""}`} style={seatPosition(index, seatedPlayers.length)} key={player.id}><header><span><i className={`presence-dot ${connectedPlayerIds.has(player.id) ? "online" : ""}`} />{player.name}{player.isYou ? " (YOU)" : ""}</span>{player.isOut ? <b>OUT</b> : player.score !== undefined && <b>{player.score} PTS</b>}</header><div className="layout-cards">{player.cards.map((card, cardIndex) => {
           const replacement = game.lastEvent?.type === "replace" && game.lastEvent.playerId === player.id && game.lastEvent.layoutIndex === cardIndex;
           const peekedCard = game.lastEvent?.type === "peek" && game.lastEvent.playerId === player.id && cardIndex >= 2;
           const powerAffected = game.lastEvent?.affectedCards?.some((affected) => affected.playerId === player.id && affected.layoutIndex === cardIndex);
@@ -226,8 +233,8 @@ export default function GamePage() {
           const selectedForSwap = powerSwapSelection?.playerId === player.id && powerSwapSelection.layoutIndex === cardIndex;
           const selectedForMatch = matchTarget?.playerId === player.id && matchTarget.layoutIndex === cardIndex;
           const displayedCard = replacementCard || peekCard || powerPeekCard || card;
-          const canSelect = game.phase === "playing" && (game.canUsePower || Boolean(matchTarget) || (player.isYou && game.canAct && game.heldCard) || game.canMatch);
-          return <button key={`${cardIndex}-${highlighted ? game.lastEvent?.id : "idle"}`} disabled={!canSelect} onClick={() => handleCardClick(player.id, player.isYou, cardIndex)} className={`layout-card ${highlighted ? "action-card-highlight" : ""} ${replacementCard ? "placed-card" : ""} ${peekCard || powerPeekCard ? "peeked-card" : ""} ${selectedForSwap || selectedForMatch ? "selected-table-card" : ""}`}><Card card={displayedCard} /></button>;
+          const canSelect = !player.isOut && game.phase === "playing" && (game.canUsePower || Boolean(matchTarget) || (player.isYou && game.canAct && game.heldCard) || game.canMatch);
+          return <button key={`${cardIndex}-${highlighted ? game.lastEvent?.id : "idle"}`} disabled={!canSelect} onClick={() => handleCardClick(player.id, player.isYou, player.isOut, cardIndex)} className={`layout-card ${highlighted ? "action-card-highlight" : ""} ${replacementCard ? "placed-card" : ""} ${peekCard || powerPeekCard ? "peeked-card" : ""} ${selectedForSwap || selectedForMatch ? "selected-table-card" : ""}`}><Card card={displayedCard} /></button>;
         })}</div></article>)}
       </section>
       <section className="turn-controls">

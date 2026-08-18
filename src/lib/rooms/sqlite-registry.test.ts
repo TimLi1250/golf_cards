@@ -40,13 +40,14 @@ test("stores an authoritative game while keeping layout card faces private", () 
 
     const peek = registry.act(room.inviteCode, "player-a", { type: "peek" });
     assert.equal(peek.privatePeek?.length, 2);
-    assert.deepEqual(peek.view.game?.players[0].cards, [null, null, null, null]);
+    assert.deepEqual(peek.view!.game?.players[0].cards, [null, null, null, null]);
 
     registry.act(room.inviteCode, "player-b", { type: "peek" });
 
     const drawn = registry.act(room.inviteCode, "player-b", { type: "draw-stock" });
-    assert.ok(drawn.view.game?.heldCard);
-    const afterReplacement = registry.act(room.inviteCode, "player-b", { type: "replace", layoutIndex: 0 });
+    assert.ok(drawn.view!.game?.heldCard);
+    let afterReplacement = registry.act(room.inviteCode, "player-b", { type: "replace", layoutIndex: 0 });
+    if (afterReplacement.view.game?.canUsePower) afterReplacement = registry.act(room.inviteCode, "player-b", { type: "skip-power" });
     assert.equal(afterReplacement.view.game?.currentPlayerName, "Avery");
   } finally {
     registry.close();
@@ -67,6 +68,37 @@ test("removes a departing player from an active game for every remaining player"
     const remainingView = registry.gameView(room.inviteCode, "player-a");
     assert.deepEqual(remainingView.room.players.map((player) => player.name), ["Avery", "Casey"]);
     assert.deepEqual(remainingView.game?.players.map((player) => player.name), ["Avery", "Casey"]);
+  } finally {
+    registry.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("eliminates a player who calls a wrong match while the other players continue", () => {
+  const directory = mkdtempSync(join(tmpdir(), "fairway-four-wrong-match-"));
+  const databasePath = join(directory, "rooms.sqlite");
+  const registry = new SqliteRoomRegistry(databasePath);
+  try {
+    const room = registry.create({ host: "Avery", hostId: "player-a", playerLimit: 3 });
+    registry.join(room.inviteCode, { playerId: "player-b", playerName: "Blake" });
+    registry.join(room.inviteCode, { playerId: "player-c", playerName: "Casey" });
+    registry.startGame(room.inviteCode, "player-a");
+
+    const database = new DatabaseSync(databasePath);
+    const stored = database.prepare("SELECT game_state FROM room_games WHERE room_id = ?").get(room.id) as { game_state: string };
+    const match = JSON.parse(stored.game_state) as { players: { id: string }[]; hole: { peekedPlayerIds: string[]; discard: unknown[]; layouts: Record<string, unknown[]> } };
+    match.hole.peekedPlayerIds = match.players.map((player) => player.id);
+    match.hole.discard = [{ id: "discard-5", rank: "5", suit: "clubs" }];
+    match.hole.layouts["player-2"][0] = { id: "wrong-4", rank: "4", suit: "hearts" };
+    database.prepare("UPDATE room_games SET game_state = ? WHERE room_id = ?").run(JSON.stringify(match), room.id);
+    database.close();
+
+    registry.act(room.inviteCode, "player-b", { type: "match-own", layoutIndex: 0 });
+    assert.deepEqual(registry.get(room.inviteCode).players.map((player) => player.name), ["Avery", "Blake", "Casey"]);
+    const remainingView = registry.gameView(room.inviteCode, "player-a");
+    assert.equal(remainingView.game?.phase, "playing");
+    assert.equal(remainingView.game?.currentPlayerName, "Casey");
+    assert.equal(remainingView.game?.players.find((player) => player.name === "Blake")?.isOut, true);
   } finally {
     registry.close();
     rmSync(directory, { recursive: true, force: true });

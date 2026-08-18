@@ -14,6 +14,9 @@ export async function GET(request: NextRequest, context: RouteContext) {
     const playerId = request.nextUrl.searchParams.get("playerId") || "";
     return NextResponse.json({ view: persistentRoomRegistry().gameView(inviteCode, playerId) });
   } catch (error) {
+    if (error instanceof RoomError && error.message === "Enter this table before viewing it.") {
+      return NextResponse.json({ needsEntry: true });
+    }
     return gameErrorResponse(error, 404);
   }
 }

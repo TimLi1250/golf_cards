@@ -6,6 +6,7 @@ export type TablePlayerView = {
   id: string;
   name: string;
   isYou: boolean;
+  isOut: boolean;
   cardCount: number;
   cards: (PublicCard | null)[];
   totalScore: number;
@@ -26,7 +27,9 @@ export type GameView = {
     holeNumber: number;
     holesToPlay: number;
     phase: "playing" | "scored" | "finished";
-    lostPlayerName?: string;
+    holeWinnerName?: string;
+    tieBreakRounds: number;
+    tieBreaks?: { playerName: string; card: PublicCard }[][];
     currentPlayerId?: string;
     currentPlayerName?: string;
     stockCount: number;
@@ -34,6 +37,7 @@ export type GameView = {
     heldCard?: PublicCard;
     isPeeking: boolean;
     peekedPlayers: number;
+    activePlayerCount: number;
     canPeek: boolean;
     canAct: boolean;
     heldCardSource?: "stock" | "discard";
