@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
+import ButtonSounds from "../components/button-sounds";
 import PwaRegistration from "../components/pwa-registration";
 import ScrollReset from "../components/scroll-reset";
 
@@ -30,7 +31,7 @@ export const viewport: Viewport = {
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
     <html lang="en">
-      <body>{children}<PwaRegistration /><ScrollReset /></body>
+      <body>{children}<ButtonSounds /><PwaRegistration /><ScrollReset /></body>
     </html>
   );
 }

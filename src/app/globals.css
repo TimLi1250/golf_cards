@@ -105,3 +105,7 @@
 
 .table-entry .entry-back-button { width:auto; margin:0 0 10px; padding:0; border:0; background:transparent; color:var(--forest); box-shadow:none; font:8px "Press Start 2P"; }
 .table-entry .entry-back-button:hover { color:var(--coral); transform:none; }
+
+.game-header-actions { display:flex; align-items:center; justify-content:end; gap:7px; }.sound-toggle { border:2px solid var(--mint); background:transparent; color:var(--mint); padding:10px 8px; font:7px "Press Start 2P"; white-space:nowrap; }.sound-toggle[aria-pressed="false"] { border-color:#8c9b93; color:#8c9b93; }.sound-toggle:hover { border-color:var(--lime); color:var(--lime); }
+
+@media (max-width:620px) { .game-header-actions { gap:4px; }.game-header-actions .copy-game-link,.sound-toggle { padding:7px 4px; font-size:5px; }.game-header-actions { flex-direction:column; align-items:stretch; } }
