@@ -45,6 +45,7 @@ export type GameView = {
     heldCardSource?: "stock" | "discard";
     knockerName?: string;
     finalMatchDeadline?: number;
+    inactivityDeadline?: number;
     pendingPower?: {
       rank: "8" | "J" | "Q";
       playerId: string;
@@ -86,4 +87,5 @@ export type GameAction =
   | { type: "give-match-card"; layoutIndex: number }
   | { type: "knock" }
   | { type: "finalize-knock" }
+  | { type: "confirm-table-active" }
   | { type: "next-hole" };

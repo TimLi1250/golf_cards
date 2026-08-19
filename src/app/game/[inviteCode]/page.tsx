@@ -7,11 +7,13 @@ import { io } from "socket.io-client";
 import type { GameAction, GameView, PublicCard } from "../../../lib/golf/protocol";
 import { copyText, playerProfile, savePlayerName } from "../../../lib/player-session";
 
-type GameResponse = { view?: GameView; needsEntry?: boolean; privatePeek?: PublicCard[]; privatePowerPeek?: { playerId: string; layoutIndex: number; card: PublicCard }; error?: string };
+type GameResponse = { view?: GameView; needsEntry?: boolean; privatePeek?: PublicCard[]; privatePowerPeek?: { playerId: string; layoutIndex: number; card: PublicCard }; privateSelfReveal?: (PublicCard | null)[]; error?: string };
 type RecentReplacement = { eventId: string; layoutIndex: number; card: PublicCard };
 type RecentPeek = { eventId: string; cards: PublicCard[] };
 type RecentPowerPeek = { eventId: string; playerId: string; layoutIndex: number; card: PublicCard };
 type CardSelection = { playerId: string; layoutIndex: number };
+type SwapTravel = { left: number; top: number; width: number; height: number; x: number; y: number; midpointX: number; midpointY: number; tilt: number };
+type RecentSwap = { eventId: string; cards: CardSelection[]; travel: SwapTravel[] };
 type PresenceUpdate = { playerIds: string[]; disconnectDeadlines: Record<string, number> };
 
 export default function GamePage() {
@@ -25,19 +27,66 @@ export default function GamePage() {
   const [linkCopied, setLinkCopied] = useState(false);
   const [recentPeek, setRecentPeek] = useState<RecentPeek>();
   const [recentPowerPeek, setRecentPowerPeek] = useState<RecentPowerPeek>();
+  const [recentSwap, setRecentSwap] = useState<RecentSwap>();
+  const [privateSelfReveal, setPrivateSelfReveal] = useState<(PublicCard | null)[]>();
   const [powerSwapSelection, setPowerSwapSelection] = useState<CardSelection>();
+  const [discardAttemptSelection, setDiscardAttemptSelection] = useState<CardSelection>();
   const [connectedPlayerIds, setConnectedPlayerIds] = useState<Set<string>>(new Set());
   const [disconnectDeadlines, setDisconnectDeadlines] = useState<Record<string, number>>({});
-  const [presenceNow, setPresenceNow] = useState(Date.now());
+  const [presenceNow, setPresenceNow] = useState(() => Date.now());
   const [recentReplacement, setRecentReplacement] = useState<RecentReplacement>();
   const [leaveConfirmation, setLeaveConfirmation] = useState(false);
   const [finalSeconds, setFinalSeconds] = useState(0);
+  const [inactivitySeconds, setInactivitySeconds] = useState(30);
   const [peekClosing, setPeekClosing] = useState(false);
   const [isMobileTable, setIsMobileTable] = useState(false);
   const isLeaving = useRef(false);
   const peekClosingRef = useRef(false);
   const peekCloseTimer = useRef<number>(undefined);
+  const swapCardElements = useRef(new Map<string, HTMLButtonElement>());
+  const handledSwapEventId = useRef<string>(undefined);
+  const swapClearTimer = useRef<number>(undefined);
+  const discardAttempt = useRef<CardSelection>(undefined);
+  const discardAttemptTimer = useRef<number>(undefined);
+  const discardAttemptLocked = useRef(false);
   const hasJoinedTable = Boolean(view);
+
+  useEffect(() => {
+    const event = view?.game?.lastEvent;
+    if (!event?.id || handledSwapEventId.current === event.id) return;
+    const animationFrame = window.requestAnimationFrame(() => {
+      handledSwapEventId.current = event.id;
+      if (swapClearTimer.current) window.clearTimeout(swapClearTimer.current);
+      if (event.type !== "power-swap" || event.affectedCards?.length !== 2) {
+        setRecentSwap(undefined);
+        return;
+      }
+
+      const firstElement = swapCardElements.current.get(cardSlotKey(event.affectedCards[0]));
+      const secondElement = swapCardElements.current.get(cardSlotKey(event.affectedCards[1]));
+      if (!firstElement || !secondElement) return;
+      const rects = [firstElement.getBoundingClientRect(), secondElement.getBoundingClientRect()];
+      const travel = rects.map((rect, index) => {
+        const destination = rects[index === 0 ? 1 : 0];
+        const x = destination.left - rect.left;
+        const y = destination.top - rect.top;
+        return {
+          left: rect.left,
+          top: rect.top,
+          width: rect.width,
+          height: rect.height,
+          x,
+          y,
+          midpointX: x / 2,
+          midpointY: y / 2 - Math.min(34, Math.max(16, Math.abs(x) * 0.08)),
+          tilt: index === 0 ? -8 : 8,
+        };
+      });
+      setRecentSwap({ eventId: event.id, cards: event.affectedCards, travel });
+      swapClearTimer.current = window.setTimeout(() => setRecentSwap(undefined), 6_000);
+    });
+    return () => window.cancelAnimationFrame(animationFrame);
+  }, [view?.game?.lastEvent]);
 
   const closePeek = useCallback(() => {
     if (peekClosingRef.current) return;
@@ -60,6 +109,10 @@ export default function GamePage() {
         return setError("");
       }
       if (!response.ok || !data.view) {
+        if (data.error === "No open table was found with that invite code.") {
+          router.replace("/");
+          return;
+        }
         if (data.error === "Enter this table before viewing it.") {
           setNeedsEntry(true);
           return setError("");
@@ -75,7 +128,7 @@ export default function GamePage() {
     } catch {
       setError("Connection lost. Retrying…");
     }
-  }, [inviteCode]);
+  }, [inviteCode, router]);
 
   useEffect(() => {
     if (needsEntry) return;
@@ -144,6 +197,15 @@ export default function GamePage() {
   }, [view?.game?.finalMatchDeadline]);
 
   useEffect(() => {
+    const deadline = view?.game?.inactivityDeadline;
+    if (!deadline) return;
+    const update = () => setInactivitySeconds(Math.max(0, Math.ceil((deadline - Date.now()) / 1_000)));
+    const initialUpdate = window.setTimeout(update, 0);
+    const timer = window.setInterval(update, 100);
+    return () => { window.clearTimeout(initialUpdate); window.clearInterval(timer); };
+  }, [view?.game?.inactivityDeadline]);
+
+  useEffect(() => {
     if (!recentPeek && !recentPowerPeek) return;
     const timer = window.setTimeout(closePeek, 5_000);
     return () => window.clearTimeout(timer);
@@ -151,6 +213,8 @@ export default function GamePage() {
 
   useEffect(() => () => {
     if (peekCloseTimer.current) window.clearTimeout(peekCloseTimer.current);
+    if (swapClearTimer.current) window.clearTimeout(swapClearTimer.current);
+    if (discardAttemptTimer.current) window.clearTimeout(discardAttemptTimer.current);
   }, []);
 
   async function joinTable(event: FormEvent<HTMLFormElement>) {
@@ -198,6 +262,7 @@ export default function GamePage() {
   }
 
   async function sendAction(action: GameAction) {
+    if (privateSelfReveal && action.type !== "match-own" && action.type !== "claim-other-match") setPrivateSelfReveal(undefined);
     const replacementCard = action.type === "replace" ? view?.game?.heldCard : undefined;
     const response = await fetch(`/api/rooms/${inviteCode}/game`, {
       method: "POST",
@@ -224,7 +289,37 @@ export default function GamePage() {
       setPeekClosing(false);
       setRecentPowerPeek(peek);
     }
+    if ((action.type === "match-own" || action.type === "claim-other-match") && data.privateSelfReveal) {
+      setPrivateSelfReveal(data.privateSelfReveal);
+    }
     setError("");
+  }
+
+  function clearDiscardAttempt() {
+    if (discardAttemptTimer.current) window.clearTimeout(discardAttemptTimer.current);
+    discardAttemptTimer.current = undefined;
+    discardAttempt.current = undefined;
+    setDiscardAttemptSelection(undefined);
+  }
+
+  async function confirmDiscardAttempt(card: CardSelection, isYou: boolean) {
+    if (discardAttemptLocked.current) return;
+    const pending = discardAttempt.current;
+    if (pending && cardSlotKey(pending) === cardSlotKey(card)) {
+      clearDiscardAttempt();
+      discardAttemptLocked.current = true;
+      try {
+        await sendAction(isYou ? { type: "match-own", layoutIndex: card.layoutIndex } : { type: "claim-other-match", targetPlayerId: card.playerId, layoutIndex: card.layoutIndex });
+      } finally {
+        discardAttemptLocked.current = false;
+      }
+      return;
+    }
+
+    clearDiscardAttempt();
+    discardAttempt.current = card;
+    setDiscardAttemptSelection(card);
+    discardAttemptTimer.current = window.setTimeout(() => clearDiscardAttempt(), 700);
   }
 
   if (!view && needsEntry) return <main className="game-loading"><section className="table-entry"><p>TABLE INVITE</p><h1>ENTER GAME</h1><button type="button" className="entry-back-button" onClick={() => router.push("/")}>← BACK TO LOBBY</button><form onSubmit={joinTable}><label>YOUR NAME<input autoFocus value={entryName} maxLength={24} onChange={(event) => setEntryName(event.target.value)} placeholder="Guest" /></label><button type="submit">ENTER TABLE →</button></form>{error && <p className="table-entry-error">{error}</p>}</section></main>;
@@ -257,8 +352,7 @@ export default function GamePage() {
       return;
     }
     if (!game.canMatch) return;
-    if (isYou) void sendAction({ type: "match-own", layoutIndex });
-    else void sendAction({ type: "claim-other-match", targetPlayerId: playerId, layoutIndex });
+    void confirmDiscardAttempt({ playerId, layoutIndex }, isYou);
   }
 
   return <main className="game-screen">
@@ -273,7 +367,7 @@ export default function GamePage() {
           <div className="center-piles"><div><p>STOCK</p><div key={game.lastEvent?.type === "draw-stock" ? game.lastEvent.id : "stock"} className={`stock-card ${game.lastEvent?.type === "draw-stock" ? "action-card-highlight" : ""}`}>?</div></div><div><p>DISCARD</p>{game.discard && <span key={["take-discard", "replace", "discard-drawn"].includes(game.lastEvent?.type || "") ? game.lastEvent?.id : "discard"} className={["take-discard", "replace", "discard-drawn"].includes(game.lastEvent?.type || "") ? "action-card-highlight" : ""}><Card card={game.discard} /></span>}</div></div>
           {game.finalMatchDeadline ? <div className="table-activity final-match-call"><strong>FINAL CALL TO MATCH THE DISCARD - {finalSeconds}S</strong></div> : <div className="table-activity" key={game.lastEvent?.id || "opening-play"}><span>TABLE FEED</span><strong>{game.lastEvent?.message || "Cards are on the table."}</strong><small>{game.currentPlayerName ? `${game.currentPlayerName.toUpperCase()} IS UP` : "WAITING FOR THE NEXT PLAY"}</small></div>}
         </div>
-        {seatedPlayers.map((player, index) => <article className={`table-player table-seat ${player.isYou ? "is-you" : ""} ${player.isOut ? "is-out" : ""} ${game.lastEvent?.playerId === player.id && ["peek", "knock"].includes(game.lastEvent.type || "") ? "action-player-highlight" : ""}`} style={seatPosition(index, seatedPlayers.length, isMobileTable)} key={player.id}><header><span><i className={`presence-dot ${connectedPlayerIds.has(player.id) ? "online" : ""}`} />{player.name}{player.isYou ? " (YOU)" : ""}</span>{player.isOut ? <b>OUT</b> : player.score !== undefined && <b>{player.score} PTS</b>}</header>{disconnectDeadlines[player.id] && <small className="disconnect-countdown">DISCONNECTED… REMOVING IN {Math.max(0, Math.ceil((disconnectDeadlines[player.id] - presenceNow) / 1_000))}S</small>}<div className="layout-cards">{player.cards.map((card, cardIndex) => {
+        {seatedPlayers.map((player, index) => <article className={`table-player table-seat ${player.isYou ? "is-you" : ""} ${player.isOut ? "is-out" : ""} ${player.isYou && privateSelfReveal ? "self-revealed" : ""} ${game.lastEvent?.playerId === player.id && ["peek", "knock"].includes(game.lastEvent.type || "") ? "action-player-highlight" : ""}`} style={seatPosition(index, seatedPlayers.length, isMobileTable)} key={player.id}><header><span><i className={`presence-dot ${connectedPlayerIds.has(player.id) ? "online" : ""}`} />{player.name}{player.isYou ? " (YOU)" : ""}</span>{player.isOut ? <b>OUT</b> : player.score !== undefined && <b>{player.score} PTS</b>}</header>{disconnectDeadlines[player.id] && <small className="disconnect-countdown">DISCONNECTED… REMOVING IN {Math.max(0, Math.ceil((disconnectDeadlines[player.id] - presenceNow) / 1_000))}S</small>}<div className="layout-cards">{player.cards.map((card, cardIndex) => {
           const replacement = game.lastEvent?.type === "replace" && game.lastEvent.playerId === player.id && game.lastEvent.layoutIndex === cardIndex;
           const peekedCard = game.lastEvent?.type === "peek" && game.lastEvent.playerId === player.id && cardIndex >= 2;
           const powerAffected = game.lastEvent?.affectedCards?.some((affected) => affected.playerId === player.id && affected.layoutIndex === cardIndex);
@@ -282,9 +376,13 @@ export default function GamePage() {
           const peekCard = player.isYou && cardIndex >= 2 && recentPeek ? recentPeek.cards[cardIndex - 2] : undefined;
           const powerPeekCard = recentPowerPeek && recentPowerPeek.playerId === player.id && recentPowerPeek.layoutIndex === cardIndex ? recentPowerPeek.card : undefined;
           const selectedForSwap = powerSwapSelection?.playerId === player.id && powerSwapSelection.layoutIndex === cardIndex;
-          const displayedCard = replacementCard || peekCard || powerPeekCard || card;
+          const discardAttemptArmed = discardAttemptSelection?.playerId === player.id && discardAttemptSelection.layoutIndex === cardIndex;
+          const displayedCard = player.isYou && privateSelfReveal ? privateSelfReveal[cardIndex] : replacementCard || peekCard || powerPeekCard || card;
+          const empty = player.isYou && privateSelfReveal ? !privateSelfReveal[cardIndex] : !player.occupiedSlots[cardIndex];
           const canSelect = !player.isOut && game.phase === "playing" && (game.canUsePower || (game.canGiveMatchCard && player.isYou) || (player.isYou && game.canAct && game.heldCard) || game.canMatch);
-          return <button key={cardIndex} disabled={!canSelect || !player.occupiedSlots[cardIndex]} onClick={() => handleCardClick(player.id, player.isYou, player.isOut, cardIndex)} className={`layout-card ${highlighted ? "action-card-highlight" : ""} ${replacementCard ? "placed-card" : ""} ${peekCard || powerPeekCard ? `peeked-card ${peekClosing ? "peek-closing" : ""}` : ""} ${selectedForSwap ? "selected-table-card" : ""}`}><Card card={displayedCard} empty={!player.occupiedSlots[cardIndex]} /></button>;
+          const cardSelection = { playerId: player.id, layoutIndex: cardIndex };
+          const swapMarked = recentSwap?.cards.some((affected) => affected.playerId === player.id && affected.layoutIndex === cardIndex);
+          return <button ref={(element) => { const key = cardSlotKey(cardSelection); if (element) swapCardElements.current.set(key, element); else swapCardElements.current.delete(key); }} key={cardIndex} disabled={!canSelect || !player.occupiedSlots[cardIndex]} onClick={() => handleCardClick(player.id, player.isYou, player.isOut, cardIndex)} className={`layout-card ${highlighted ? "action-card-highlight" : ""} ${replacementCard ? "placed-card" : ""} ${peekCard || powerPeekCard ? `peeked-card ${peekClosing ? "peek-closing" : ""}` : ""} ${selectedForSwap ? "selected-table-card" : ""} ${swapMarked ? "swap-marked-card" : ""} ${discardAttemptArmed ? "discard-attempt-armed" : ""}`}><Card card={displayedCard} empty={empty} />{swapMarked && <span className="swap-card-badge" aria-label="Recently swapped">↔</span>}{discardAttemptArmed && <span className="discard-attempt-badge" aria-hidden="true">2×</span>}</button>;
         })}</div></article>)}
       </section>
       <section className="turn-controls">
@@ -297,13 +395,19 @@ export default function GamePage() {
           {game.canGiveMatchCard && game.pendingMatchGift && <p>MATCH CONFIRMED: {game.pendingMatchGift.targetPlayerName}&apos;s card is gone. Choose one of your cards to give them.</p>}
           {game.canAct && !game.heldCard && !game.pendingPower && <><button onClick={() => sendAction({ type: "draw-stock" })}>DRAW STOCK</button>{game.discard && <button onClick={() => sendAction({ type: "take-discard" })}>TAKE DISCARD</button>}<button className="outline" onClick={() => sendAction({ type: "knock" })}>{game.knockerName ? "PASS FINAL TURN" : "KNOCK"}</button></>}
           {game.canAct && game.heldCard && <><div className="held-card"><span>DRAWN CARD</span><Card card={game.heldCard} /></div>{game.heldCardSource === "stock" && <button className="outline" onClick={() => sendAction({ type: "discard-drawn" })}>DISCARD DRAWN CARD</button>}<p>Choose one of your cards to replace.</p></>}
-          {game.canMatch && <p className="match-hint">MATCH THE DISCARD: click one of your cards, or click an opponent&apos;s card to check it.</p>}
+          {game.canMatch && <p className="match-hint">{discardAttemptSelection ? "MATCH ARMED: SELECT THE HIGHLIGHTED CARD AGAIN TO CONFIRM." : "MATCH THE DISCARD: DOUBLE-CLICK OR DOUBLE-TAP A CARD TO TRY IT."}</p>}
         </>}
       </section>
       {error && <p className="game-error">{error}</p>}
     </>}
+    {recentSwap?.travel.map((card, index) => <span aria-hidden="true" className="swap-travel-card" key={`${recentSwap.eventId}-${index}`} style={{ left: card.left, top: card.top, width: card.width, height: card.height, "--swap-x": `${card.x}px`, "--swap-y": `${card.y}px`, "--swap-midpoint-x": `${card.midpointX}px`, "--swap-midpoint-y": `${card.midpointY}px`, "--swap-tilt": `${card.tilt}deg` } as CSSProperties}>?</span>)}
+    {game?.inactivityDeadline && <div className="leave-game-overlay inactivity-overlay" role="dialog" aria-modal="true" aria-labelledby="inactivity-title"><section><p>TABLE INACTIVE</p><h2 id="inactivity-title">STILL PLAYING?</h2><span>No moves have been made for a few minutes. Confirm to keep this table open.</span><strong>{inactivitySeconds}</strong><small>SECONDS REMAINING</small><button type="button" disabled={inactivitySeconds === 0} onClick={() => void sendAction({ type: "confirm-table-active" })}>KEEP TABLE OPEN</button></section></div>}
     {leaveConfirmation && <div className="leave-game-overlay" role="dialog" aria-modal="true" aria-labelledby="leave-game-title"><section><p>LEAVING MID-GAME</p><h2 id="leave-game-title">LEAVE THIS GAME?</h2><span>You will be removed from the table for every player.</span><div><button type="button" className="stay-button" onClick={() => setLeaveConfirmation(false)}>STAY</button><button type="button" className="leave-button" onClick={() => void leaveTable()}>LEAVE GAME</button></div></section></div>}
   </main>;
+}
+
+function cardSlotKey(card: CardSelection): string {
+  return `${card.playerId}:${card.layoutIndex}`;
 }
 
 function Card({ card, empty = false }: { card: PublicCard | null; empty?: boolean }) {
@@ -325,7 +429,11 @@ function arrangeSeats<T extends { isYou: boolean }>(players: T[]): T[] {
 function seatPosition(index: number, total: number, mobile = false): CSSProperties {
   const degrees = 90 + (index * 360) / total;
   const angle = (degrees * Math.PI) / 180;
-  const radiusX = mobile ? total > 8 ? 34 : total > 5 ? 32 : 31 : total > 8 ? 43 : total > 5 ? 40 : 36;
-  const radiusY = mobile ? total > 8 ? 32 : total > 5 ? 30 : 28 : total > 8 ? 40 : total > 5 ? 37 : 33;
-  return { left: `${50 + Math.cos(angle) * radiusX}%`, top: `${50 + Math.sin(angle) * radiusY}%` };
+  const radiusX = mobile ? total > 8 ? 38 : total > 5 ? 37 : 36 : total > 8 ? 43 : total > 5 ? 40 : 36;
+  const radiusY = mobile ? total > 5 ? 38 : 35 : total > 8 ? 40 : total > 5 ? 37 : 33;
+  const verticalOffset = Math.sin(angle) * radiusY;
+  const spacedVerticalOffset = mobile && Math.abs(verticalOffset) > 0.01
+    ? Math.sign(verticalOffset) * Math.max(Math.abs(verticalOffset), 25)
+    : verticalOffset;
+  return { left: `${50 + Math.cos(angle) * radiusX}%`, top: `${50 + spacedVerticalOffset}%` };
 }

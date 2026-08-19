@@ -178,7 +178,7 @@ export class SqliteRoomRegistry {
         const match = JSON.parse(storedGame.game_state) as MatchState;
         finished = removePlayer(match, `player-${playerIndex + 1}`).finished;
         match.lastEvent = { id: eventId(), message: `${players[playerIndex].name} left the game${finished ? "; the game is over." : "."}`, playerId: roomPlayerId, type: "leave" };
-        this.database.prepare("UPDATE room_games SET game_state = ? WHERE room_id = ?").run(JSON.stringify(match), room.id);
+        this.database.prepare("UPDATE room_games SET game_state = ?, last_activity_at = ?, inactivity_deadline = NULL WHERE room_id = ?").run(JSON.stringify(match), Date.now(), room.id);
         if (finished) this.database.prepare("UPDATE rooms SET status = 'finished' WHERE id = ?").run(room.id);
       }
       this.database.prepare("DELETE FROM room_players WHERE room_id = ? AND id = ?").run(room.id, roomPlayerId);
@@ -195,6 +195,42 @@ export class SqliteRoomRegistry {
     if (!room) return false;
     this.database.prepare("DELETE FROM rooms WHERE id = ?").run(room.id);
     return true;
+  }
+
+  sweepInactiveTables(now = Date.now(), inactiveAfterMs = 3 * 60_000, warningMs = 30_000): { warnedInviteCodes: string[]; removedInviteCodes: string[] } {
+    const removedInviteCodes: string[] = [];
+    const warnedInviteCodes: string[] = [];
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const expired = this.database.prepare("SELECT rooms.id, rooms.invite_code FROM rooms JOIN room_games ON room_games.room_id = rooms.id WHERE rooms.status = 'playing' AND room_games.inactivity_deadline IS NOT NULL AND room_games.inactivity_deadline <= ?")
+        .all(now) as unknown as { id: string; invite_code: string }[];
+      for (const room of expired) {
+        this.database.prepare("DELETE FROM rooms WHERE id = ?").run(room.id);
+        removedInviteCodes.push(room.invite_code);
+      }
+
+      const inactive = this.database.prepare("SELECT rooms.id, rooms.invite_code FROM rooms JOIN room_games ON room_games.room_id = rooms.id WHERE rooms.status = 'playing' AND room_games.inactivity_deadline IS NULL AND room_games.last_activity_at <= ?")
+        .all(now - inactiveAfterMs) as unknown as { id: string; invite_code: string }[];
+      for (const room of inactive) {
+        this.database.prepare("UPDATE room_games SET inactivity_deadline = ? WHERE room_id = ?").run(now + warningMs, room.id);
+        warnedInviteCodes.push(room.invite_code);
+      }
+      this.database.exec("COMMIT");
+      return { warnedInviteCodes, removedInviteCodes };
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  confirmTableActive(inviteCode: string, playerId: string, now = Date.now()): GameView {
+    const room = this.requireRoom(inviteCode);
+    if (room.host_player_id !== playerId) throw new RoomError("Only the host can keep this table open.");
+    const game = this.database.prepare("SELECT inactivity_deadline FROM room_games WHERE room_id = ?").get(room.id) as unknown as { inactivity_deadline: number | null } | undefined;
+    if (!game) throw new RoomError("Game state could not be found.");
+    if (game.inactivity_deadline !== null && game.inactivity_deadline <= now) throw new RoomError("This table's inactivity timer has expired.");
+    this.database.prepare("UPDATE room_games SET last_activity_at = ?, inactivity_deadline = NULL WHERE room_id = ?").run(now, room.id);
+    return this.gameView(inviteCode, playerId);
   }
 
   close(): void {
@@ -218,8 +254,8 @@ export class SqliteRoomRegistry {
     this.database.exec("BEGIN IMMEDIATE");
     try {
       this.database.prepare("UPDATE rooms SET status = 'playing' WHERE id = ?").run(room.id);
-      this.database.prepare("INSERT INTO room_games (room_id, game_state) VALUES (?, ?) ON CONFLICT(room_id) DO UPDATE SET game_state = excluded.game_state")
-        .run(room.id, JSON.stringify(match));
+      this.database.prepare("INSERT INTO room_games (room_id, game_state, last_activity_at, inactivity_deadline) VALUES (?, ?, ?, NULL) ON CONFLICT(room_id) DO UPDATE SET game_state = excluded.game_state, last_activity_at = excluded.last_activity_at, inactivity_deadline = NULL")
+        .run(room.id, JSON.stringify(match), Date.now());
       this.database.exec("COMMIT");
     } catch (error) {
       this.database.exec("ROLLBACK");
@@ -242,7 +278,7 @@ export class SqliteRoomRegistry {
     const viewerIndex = players.findIndex((player) => player.id === playerId);
     if (viewerIndex === -1) throw new RoomError("Enter this table before viewing it.");
     const canStart = room.status === "lobby" && room.host_player_id === playerId;
-    const storedGame = this.database.prepare("SELECT game_state FROM room_games WHERE room_id = ?").get(room.id) as unknown as { game_state: string } | undefined;
+    const storedGame = this.database.prepare("SELECT game_state, inactivity_deadline FROM room_games WHERE room_id = ?").get(room.id) as unknown as { game_state: string; inactivity_deadline: number | null } | undefined;
     if (!storedGame) return { room: roomView, canStart };
 
     const match = JSON.parse(storedGame.game_state) as MatchState;
@@ -317,13 +353,14 @@ export class SqliteRoomRegistry {
         canGiveMatchCard: pendingMatchGift?.playerId === viewerEngineId,
         knockerName: match.hole.knockerId ? match.players.find((player) => player.id === match.hole.knockerId)?.name : undefined,
         finalMatchDeadline: match.hole.finalMatchDeadline,
+        inactivityDeadline: room.host_player_id === playerId ? storedGame.inactivity_deadline ?? undefined : undefined,
         lastEvent: match.lastEvent,
         players: viewPlayers,
       },
     };
   }
 
-  act(inviteCode: string, roomPlayerId: string, action: Exclude<GameAction, { type: "start" }>): { view: GameView; privatePeek?: PublicCard[]; privatePowerPeek?: { playerId: string; layoutIndex: number; card: PublicCard } } {
+  act(inviteCode: string, roomPlayerId: string, action: Exclude<GameAction, { type: "start" } | { type: "confirm-table-active" }>): { view: GameView; privatePeek?: PublicCard[]; privatePowerPeek?: { playerId: string; layoutIndex: number; card: PublicCard }; privateSelfReveal?: (PublicCard | null)[] } {
     const room = this.requireRoom(inviteCode);
     if (room.status !== "playing") throw new RoomError("This game has not started.");
     const players = this.playersFor(room.id);
@@ -335,6 +372,7 @@ export class SqliteRoomRegistry {
     const match = JSON.parse(storedGame.game_state) as MatchState;
     let privatePeek: PublicCard[] | undefined;
     let privatePowerPeek: { playerId: string; layoutIndex: number; card: PublicCard } | undefined;
+    let privateSelfReveal: (PublicCard | null)[] | undefined;
     let eventType: NonNullable<MatchEvent["type"]> = action.type === "use-swap-power" || action.type === "use-peek-power"
       ? "power-peek"
       : action.type === "claim-other-match" || action.type === "give-match-card"
@@ -359,7 +397,13 @@ export class SqliteRoomRegistry {
         const second = action.second ? engineReference(action.second.playerId, action.second.layoutIndex) : undefined;
         resolveSwapPower(match, enginePlayerId, first, second);
         eventType = "power-swap";
-        eventMessage = first && second ? `${players[playerIndex]?.name || "A player"} swapped two cards with an 8.` : `${players[playerIndex]?.name || "A player"} kept the table as it was.`;
+        const firstName = action.first ? players.find((player) => player.id === action.first?.playerId)?.name || "one player" : "";
+        const secondName = action.second ? players.find((player) => player.id === action.second?.playerId)?.name || "another player" : "";
+        eventMessage = first && second
+          ? action.first?.playerId === action.second?.playerId
+            ? `${players[playerIndex]?.name || "A player"} swapped two of ${firstName}'s cards with an 8.`
+            : `${players[playerIndex]?.name || "A player"} swapped cards between ${firstName} and ${secondName} with an 8.`
+          : `${players[playerIndex]?.name || "A player"} kept the table as it was.`;
         affectedCards = [action.first, action.second].filter((card): card is { playerId: string; layoutIndex: number } => Boolean(card));
         break;
       }
@@ -382,6 +426,7 @@ export class SqliteRoomRegistry {
         eventType = "match-own";
         let elimination;
         if (!result.correct) {
+          privateSelfReveal = match.hole.layouts[enginePlayerId].map((card) => card ? publicCard(card) : null);
           elimination = eliminatePlayer(match, enginePlayerId);
         }
         const winnerName = elimination?.winnerId ? match.players.find((player) => player.id === elimination.winnerId)?.name || "The remaining player" : "";
@@ -395,6 +440,7 @@ export class SqliteRoomRegistry {
         const targetName = players.find((player) => player.id === action.targetPlayerId)?.name || "another player";
         let elimination;
         if (!result.correct) {
+          privateSelfReveal = match.hole.layouts[enginePlayerId].map((card) => card ? publicCard(card) : null);
           elimination = eliminatePlayer(match, enginePlayerId);
         }
         const winnerName = elimination?.winnerId ? match.players.find((player) => player.id === elimination.winnerId)?.name || "The remaining player" : "";
@@ -430,7 +476,7 @@ export class SqliteRoomRegistry {
       : completedHoleMessage || eventMessage || actionMessage(playerName, action);
     match.lastEvent = { id: eventId(), message, playerId: roomPlayerId, type: eventType, layoutIndex: action.type === "replace" ? action.layoutIndex : undefined, affectedCards };
     this.saveMatch(room.id, match);
-    return { view: this.gameView(inviteCode, roomPlayerId), privatePeek, privatePowerPeek };
+    return { view: this.gameView(inviteCode, roomPlayerId), privatePeek, privatePowerPeek, privateSelfReveal };
   }
 
   private migrate() {
@@ -456,7 +502,9 @@ export class SqliteRoomRegistry {
       CREATE INDEX IF NOT EXISTS room_players_by_room ON room_players(room_id);
       CREATE TABLE IF NOT EXISTS room_games (
         room_id TEXT PRIMARY KEY REFERENCES rooms(id) ON DELETE CASCADE,
-        game_state TEXT NOT NULL
+        game_state TEXT NOT NULL,
+        last_activity_at INTEGER NOT NULL DEFAULT 0,
+        inactivity_deadline INTEGER
       ) STRICT;
       CREATE TABLE IF NOT EXISTS player_profiles (
         id TEXT PRIMARY KEY,
@@ -470,6 +518,14 @@ export class SqliteRoomRegistry {
     if (!columns.some((column) => column.name === "host_player_id")) {
       this.database.exec("ALTER TABLE rooms ADD COLUMN host_player_id TEXT NOT NULL DEFAULT '';\n        UPDATE rooms SET host_player_id = COALESCE((SELECT id FROM room_players WHERE room_id = rooms.id ORDER BY joined_at ASC LIMIT 1), '') WHERE host_player_id = ''; ");
     }
+    const gameColumns = this.database.prepare("PRAGMA table_info(room_games)").all() as unknown as { name: string }[];
+    if (!gameColumns.some((column) => column.name === "last_activity_at")) {
+      this.database.exec("ALTER TABLE room_games ADD COLUMN last_activity_at INTEGER NOT NULL DEFAULT 0;");
+    }
+    if (!gameColumns.some((column) => column.name === "inactivity_deadline")) {
+      this.database.exec("ALTER TABLE room_games ADD COLUMN inactivity_deadline INTEGER;");
+    }
+    this.database.prepare("UPDATE room_games SET last_activity_at = ? WHERE last_activity_at = 0").run(Date.now());
     this.database.exec("INSERT OR IGNORE INTO player_profiles (id, name) SELECT id, name FROM room_players;");
   }
 
@@ -503,7 +559,7 @@ export class SqliteRoomRegistry {
   private saveMatch(roomId: string, match: MatchState): void {
     this.database.exec("BEGIN IMMEDIATE");
     try {
-      this.database.prepare("UPDATE room_games SET game_state = ? WHERE room_id = ?").run(JSON.stringify(match), roomId);
+      this.database.prepare("UPDATE room_games SET game_state = ?, last_activity_at = ?, inactivity_deadline = NULL WHERE room_id = ?").run(JSON.stringify(match), Date.now(), roomId);
       if (match.status === "finished") this.database.prepare("UPDATE rooms SET status = 'finished' WHERE id = ?").run(roomId);
       this.database.exec("COMMIT");
     } catch (error) {
@@ -533,7 +589,7 @@ function cleanText(value: string | undefined, fallback: string, maxLength: numbe
   return cleaned || fallback;
 }
 
-function actionMessage(playerName: string, action: Exclude<GameAction, { type: "start" }>): string {
+function actionMessage(playerName: string, action: Exclude<GameAction, { type: "start" } | { type: "confirm-table-active" }>): string {
   switch (action.type) {
     case "peek": return `${playerName} peeked at two cards.`;
     case "draw-stock": return `${playerName} drew from the stock pile.`;
@@ -570,7 +626,7 @@ declare global {
 }
 
 export function persistentRoomRegistry(): SqliteRoomRegistry {
-  const registryVersion = 17;
+  const registryVersion = 18;
   if (globalThis.fairwayFourRoomRegistryVersion !== registryVersion || !globalThis.fairwayFourRoomRegistry) {
     const oldRegistry = globalThis.fairwayFourRoomRegistry as { close?: unknown } | undefined;
     if (typeof oldRegistry?.close === "function") oldRegistry.close();

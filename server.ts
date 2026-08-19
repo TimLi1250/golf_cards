@@ -111,6 +111,15 @@ async function bootstrap() {
   }, 60_000);
   emptyTableSweep.unref();
 
+  const inactiveTableSweep = setInterval(() => {
+    const { warnedInviteCodes, removedInviteCodes } = persistentRoomRegistry().sweepInactiveTables();
+    for (const inviteCode of warnedInviteCodes) publishRoomUpdate(inviteCode);
+    if (removedInviteCodes.length === 0) return;
+    publishLobbyUpdate();
+    for (const inviteCode of removedInviteCodes) publishRoomUpdate(inviteCode);
+  }, 1_000);
+  inactiveTableSweep.unref();
+
   httpServer.listen(port, () => {
     console.log(`> Ready on http://localhost:${port}`);
   });

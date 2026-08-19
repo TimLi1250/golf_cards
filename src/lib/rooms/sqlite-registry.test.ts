@@ -98,12 +98,86 @@ test("eliminates a player who calls a wrong match while the other players contin
     database.prepare("UPDATE room_games SET game_state = ? WHERE room_id = ?").run(JSON.stringify(match), room.id);
     database.close();
 
-    registry.act(room.inviteCode, "player-b", { type: "match-own", layoutIndex: 0 });
+    const wrongGuess = registry.act(room.inviteCode, "player-b", { type: "match-own", layoutIndex: 0 });
+    assert.equal(wrongGuess.privateSelfReveal?.length, 4);
+    assert.equal(wrongGuess.privateSelfReveal?.[0]?.rank, "4");
+    assert.deepEqual(wrongGuess.view.game?.players.find((player) => player.name === "Blake")?.cards, [null, null, null, null]);
     assert.deepEqual(registry.get(room.inviteCode).players.map((player) => player.name), ["Avery", "Blake", "Casey"]);
     const remainingView = registry.gameView(room.inviteCode, "player-a");
     assert.equal(remainingView.game?.phase, "playing");
     assert.equal(remainingView.game?.currentPlayerName, "Casey");
     assert.equal(remainingView.game?.players.find((player) => player.name === "Blake")?.isOut, true);
+    assert.deepEqual(remainingView.game?.players.find((player) => player.name === "Blake")?.cards, [null, null, null, null]);
+  } finally {
+    registry.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("privately reveals only the caller's cards after a wrong opponent match", () => {
+  const directory = mkdtempSync(join(tmpdir(), "fairway-four-wrong-opponent-match-"));
+  const databasePath = join(directory, "rooms.sqlite");
+  const registry = new SqliteRoomRegistry(databasePath);
+  try {
+    const room = registry.create({ host: "Avery", hostId: "player-a", playerLimit: 3 });
+    registry.join(room.inviteCode, { playerId: "player-b", playerName: "Blake" });
+    registry.join(room.inviteCode, { playerId: "player-c", playerName: "Casey" });
+    registry.startGame(room.inviteCode, "player-a");
+
+    const database = new DatabaseSync(databasePath);
+    const stored = database.prepare("SELECT game_state FROM room_games WHERE room_id = ?").get(room.id) as { game_state: string };
+    const match = JSON.parse(stored.game_state) as { players: { id: string }[]; hole: { peekedPlayerIds: string[]; discard: unknown[]; layouts: Record<string, unknown[]> } };
+    match.hole.peekedPlayerIds = match.players.map((player) => player.id);
+    match.hole.discard = [{ id: "discard-5", rank: "5", suit: "clubs" }];
+    match.hole.layouts["player-1"][0] = { id: "wrong-target", rank: "K", suit: "spades" };
+    match.hole.layouts["player-2"] = [
+      { id: "caller-a", rank: "A", suit: "clubs" },
+      { id: "caller-2", rank: "2", suit: "diamonds" },
+      { id: "caller-3", rank: "3", suit: "hearts" },
+      { id: "caller-4", rank: "4", suit: "spades" },
+    ];
+    database.prepare("UPDATE room_games SET game_state = ? WHERE room_id = ?").run(JSON.stringify(match), room.id);
+    database.close();
+
+    const wrongGuess = registry.act(room.inviteCode, "player-b", { type: "claim-other-match", targetPlayerId: "player-a", layoutIndex: 0 });
+    assert.deepEqual(wrongGuess.privateSelfReveal?.map((card) => card?.rank), ["A", "2", "3", "4"]);
+    assert.deepEqual(wrongGuess.view.game?.players.find((player) => player.name === "Avery")?.cards, [null, null, null, null]);
+    assert.deepEqual(wrongGuess.view.game?.players.find((player) => player.name === "Blake")?.cards, [null, null, null, null]);
+  } finally {
+    registry.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("warns only the host before removing an inactive table", () => {
+  const directory = mkdtempSync(join(tmpdir(), "fairway-four-inactive-"));
+  const databasePath = join(directory, "rooms.sqlite");
+  const registry = new SqliteRoomRegistry(databasePath);
+  try {
+    const room = registry.create({ host: "Avery", hostId: "player-a", playerLimit: 2 });
+    registry.join(room.inviteCode, { playerId: "player-b", playerName: "Blake" });
+    registry.startGame(room.inviteCode, "player-a");
+    const now = Date.now();
+    const database = new DatabaseSync(databasePath);
+    database.prepare("UPDATE room_games SET last_activity_at = ? WHERE room_id = ?").run(now - 180_001, room.id);
+
+    assert.deepEqual(registry.sweepInactiveTables(now), { warnedInviteCodes: [room.inviteCode], removedInviteCodes: [] });
+    assert.equal(registry.gameView(room.inviteCode, "player-a").game?.inactivityDeadline, now + 30_000);
+    assert.equal(registry.gameView(room.inviteCode, "player-b").game?.inactivityDeadline, undefined);
+    assert.throws(() => registry.confirmTableActive(room.inviteCode, "player-b", now + 1_000));
+    assert.equal(registry.confirmTableActive(room.inviteCode, "player-a", now + 1_000).game?.inactivityDeadline, undefined);
+
+    database.prepare("UPDATE room_games SET last_activity_at = ? WHERE room_id = ?").run(now - 180_001, room.id);
+    registry.sweepInactiveTables(now);
+    registry.act(room.inviteCode, "player-a", { type: "peek" });
+    assert.equal(registry.gameView(room.inviteCode, "player-a").game?.inactivityDeadline, undefined);
+
+    database.prepare("UPDATE room_games SET last_activity_at = ?, inactivity_deadline = NULL WHERE room_id = ?").run(now - 180_001, room.id);
+    registry.sweepInactiveTables(now);
+    assert.throws(() => registry.confirmTableActive(room.inviteCode, "player-a", now + 30_000));
+    assert.deepEqual(registry.sweepInactiveTables(now + 30_000), { warnedInviteCodes: [], removedInviteCodes: [room.inviteCode] });
+    assert.throws(() => registry.get(room.inviteCode));
+    database.close();
   } finally {
     registry.close();
     rmSync(directory, { recursive: true, force: true });

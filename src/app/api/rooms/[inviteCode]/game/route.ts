@@ -29,7 +29,9 @@ export async function POST(request: NextRequest, context: RouteContext) {
     const registry = persistentRoomRegistry();
     const result = body.action.type === "start"
       ? { view: registry.startGame(inviteCode, body.playerId) }
-      : registry.act(inviteCode, body.playerId, body.action);
+      : body.action.type === "confirm-table-active"
+        ? { view: registry.confirmTableActive(inviteCode, body.playerId) }
+        : registry.act(inviteCode, body.playerId, body.action);
     publishRoomUpdate(inviteCode);
     publishLobbyUpdate();
     return NextResponse.json(result);
