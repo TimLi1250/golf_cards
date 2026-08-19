@@ -4,6 +4,7 @@ import { dirname, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
   discardDrawnStockCard,
+  keepDrawnCard,
   drawFromStock,
   claimOpponentMatch,
   eliminatePlayer,
@@ -23,6 +24,7 @@ import {
 } from "../golf/engine";
 import type { Card, LayoutCardReference, MatchEvent, MatchState } from "../golf/engine";
 import type { GameAction, GameView, PublicCard } from "../golf/protocol";
+import type { ChatMessage } from "../chat";
 import { disconnectDeadline } from "../realtime/disconnect-state";
 import { PublicRoom, Room, RoomError, RoomPlayer } from "./registry";
 
@@ -47,6 +49,16 @@ type PlayerRow = {
 type PlayerProfileRow = {
   id: string;
   name: string;
+};
+
+type ChatMessageRow = {
+  id: string;
+  channel: "lobby" | "room";
+  room_id: string | null;
+  player_id: string;
+  player_name: string;
+  body: string;
+  sent_at: number;
 };
 
 /**
@@ -115,9 +127,55 @@ export class SqliteRoomRegistry {
     return players.map((player) => ({ id: player.id, name: player.name }));
   }
 
+  lobbyChat(): ChatMessage[] {
+    const rows = this.database.prepare("SELECT * FROM chat_messages WHERE channel = 'lobby' ORDER BY sent_at DESC LIMIT 100").all() as unknown as ChatMessageRow[];
+    return rows.reverse().map((row) => this.mapChatMessage(row));
+  }
+
+  roomChat(inviteCode: string, playerId: string): ChatMessage[] {
+    const room = this.requireRoom(inviteCode);
+    this.requireRoomPlayer(room.id, playerId);
+    const rows = this.database.prepare("SELECT * FROM chat_messages WHERE channel = 'room' AND room_id = ? ORDER BY sent_at DESC LIMIT 100").all(room.id) as unknown as ChatMessageRow[];
+    return rows.reverse().map((row) => this.mapChatMessage(row, room.invite_code));
+  }
+
+  postLobbyChat(input: { playerId: string; playerName: string; body: string }): ChatMessage {
+    const playerId = cleanText(input.playerId, "", 100);
+    if (!playerId) throw new RoomError("A player session is required to chat.");
+    const playerName = cleanText(input.playerName, "Guest", 24);
+    const body = cleanChatBody(input.body);
+    this.upsertPlayer(playerId, playerName);
+    const message: ChatMessage = { id: randomUUID(), channel: "lobby", playerId, playerName, body, sentAt: Date.now() };
+    this.database.prepare("INSERT INTO chat_messages (id, channel, room_id, player_id, player_name, body, sent_at) VALUES (?, 'lobby', NULL, ?, ?, ?, ?)")
+      .run(message.id, playerId, playerName, body, message.sentAt);
+    this.trimChat("lobby");
+    return message;
+  }
+
+  postRoomChat(inviteCode: string, input: { playerId: string; body: string }): ChatMessage {
+    const room = this.requireRoom(inviteCode);
+    const playerId = cleanText(input.playerId, "", 100);
+    const player = this.requireRoomPlayer(room.id, playerId);
+    const body = cleanChatBody(input.body);
+    const message: ChatMessage = { id: randomUUID(), channel: "room", inviteCode: room.invite_code, playerId, playerName: player.name, body, sentAt: Date.now() };
+    this.database.prepare("INSERT INTO chat_messages (id, channel, room_id, player_id, player_name, body, sent_at) VALUES (?, 'room', ?, ?, ?, ?, ?)")
+      .run(message.id, room.id, playerId, player.name, body, message.sentAt);
+    this.trimChat("room", room.id);
+    return message;
+  }
+
   playersInOpenTables(): Set<string> {
     const rows = this.database.prepare("SELECT DISTINCT room_players.id FROM room_players JOIN rooms ON rooms.id = room_players.room_id WHERE rooms.status != 'finished'").all() as unknown as { id: string }[];
     return new Set(rows.map((row) => row.id));
+  }
+
+  isRoomPlayer(inviteCode: string, playerId: string): boolean {
+    try {
+      const room = this.requireRoom(inviteCode);
+      return Boolean(this.database.prepare("SELECT 1 FROM room_players WHERE room_id = ? AND id = ?").get(room.id, cleanText(playerId, "", 100)));
+    } catch {
+      return false;
+    }
   }
 
   get(inviteCode: string): PublicRoom {
@@ -342,8 +400,15 @@ export class SqliteRoomRegistry {
           playerId: players[pendingPowerIndex]?.id || "",
           playerName: match.players[pendingPowerIndex]?.name || "A player",
         } : undefined,
-        canUsePower: viewerCanAct && pendingPower?.playerId === viewerEngineId,
-        canMatch: Boolean(discard) && match.status === "playing" && !isPeeking && match.hole.status === "playing" && !match.hole.heldCard && !pendingPower && !pendingMatchGift && Boolean(viewerEngineId && !match.eliminatedPlayerIds?.includes(viewerEngineId) && match.hole.layouts[viewerEngineId]?.some(Boolean)),
+        // Powers are resolved by their owner even after the normal turn has
+        // advanced. A used power is waiting only for its owner to continue,
+        // leaving them free to call a matching card first.
+        canUsePower: Boolean(pendingPower?.playerId === viewerEngineId && pendingPower?.used !== true),
+        canCompletePower: Boolean(pendingPower?.playerId === viewerEngineId),
+        // The discard remains a valid match target while somebody is holding
+        // a stock card or resolving a power. A pending gift is deliberately
+        // exclusive because it has an empty card slot to fill first.
+        canMatch: Boolean(discard) && match.status === "playing" && !isPeeking && match.hole.status === "playing" && !pendingMatchGift && Boolean(viewerEngineId && !match.eliminatedPlayerIds?.includes(viewerEngineId) && match.hole.layouts[viewerEngineId]?.some(Boolean)),
         pendingMatchGift: pendingMatchGift ? {
           playerId: players[match.players.findIndex((player) => player.id === pendingMatchGift.playerId)]?.id || "",
           playerName: match.players.find((player) => player.id === pendingMatchGift.playerId)?.name || "A player",
@@ -392,6 +457,7 @@ export class SqliteRoomRegistry {
       case "take-discard": takeDiscard(match, enginePlayerId); break;
       case "replace": replaceLayoutCard(match, enginePlayerId, action.layoutIndex); break;
       case "discard-drawn": discardDrawnStockCard(match, enginePlayerId); break;
+      case "keep-drawn": keepDrawnCard(match, enginePlayerId); break;
       case "use-swap-power": {
         const first = action.first ? engineReference(action.first.playerId, action.first.layoutIndex) : undefined;
         const second = action.second ? engineReference(action.second.playerId, action.second.layoutIndex) : undefined;
@@ -430,7 +496,7 @@ export class SqliteRoomRegistry {
           elimination = eliminatePlayer(match, enginePlayerId);
         }
         const winnerName = elimination?.winnerId ? match.players.find((player) => player.id === elimination.winnerId)?.name || "The remaining player" : "";
-        eventMessage = result.correct ? `${players[playerIndex]?.name || "A player"} matched the discard and lost a card.` : elimination?.advanced ? `${players[playerIndex]?.name || "A player"} called a wrong match. ${winnerName} wins the hole — next hole starts now.` : `${players[playerIndex]?.name || "A player"} called a wrong match and is out of the game.`;
+        eventMessage = result.correct ? `${players[playerIndex]?.name || "A player"} matched the discard and lost a card.` : elimination?.winnerId ? `${players[playerIndex]?.name || "A player"} called a wrong match. ${winnerName} wins the hole.` : `${players[playerIndex]?.name || "A player"} called a wrong match and is out of the game.`;
         affectedCards = [{ playerId: roomPlayerId, layoutIndex: action.layoutIndex }];
         break;
       }
@@ -444,7 +510,7 @@ export class SqliteRoomRegistry {
           elimination = eliminatePlayer(match, enginePlayerId);
         }
         const winnerName = elimination?.winnerId ? match.players.find((player) => player.id === elimination.winnerId)?.name || "The remaining player" : "";
-        eventMessage = result.correct ? `${players[playerIndex]?.name || "A player"} matched ${targetName}'s card and must now give one card.` : elimination?.advanced ? `${players[playerIndex]?.name || "A player"} called ${targetName}'s card wrong. ${winnerName} wins the hole — next hole starts now.` : `${players[playerIndex]?.name || "A player"} called ${targetName}'s card wrong and is out of the game.`;
+        eventMessage = result.correct ? `${players[playerIndex]?.name || "A player"} matched ${targetName}'s card and must now give one card.` : elimination?.winnerId ? `${players[playerIndex]?.name || "A player"} called ${targetName}'s card wrong. ${winnerName} wins the hole.` : `${players[playerIndex]?.name || "A player"} called ${targetName}'s card wrong and is out of the game.`;
         affectedCards = [{ playerId: action.targetPlayerId, layoutIndex: action.layoutIndex }];
         break;
       }
@@ -510,6 +576,18 @@ export class SqliteRoomRegistry {
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL
       ) STRICT;
+      CREATE TABLE IF NOT EXISTS chat_messages (
+        id TEXT PRIMARY KEY,
+        channel TEXT NOT NULL CHECK (channel IN ('lobby', 'room')),
+        room_id TEXT REFERENCES rooms(id) ON DELETE CASCADE,
+        player_id TEXT NOT NULL,
+        player_name TEXT NOT NULL,
+        body TEXT NOT NULL,
+        sent_at INTEGER NOT NULL,
+        CHECK ((channel = 'lobby' AND room_id IS NULL) OR (channel = 'room' AND room_id IS NOT NULL))
+      ) STRICT;
+      CREATE INDEX IF NOT EXISTS chat_messages_by_channel ON chat_messages(channel, sent_at DESC);
+      CREATE INDEX IF NOT EXISTS chat_messages_by_room ON chat_messages(room_id, sent_at DESC);
     `);
     const columns = this.database.prepare("PRAGMA table_info(rooms)").all() as unknown as { name: string }[];
     if (!columns.some((column) => column.name === "is_private")) {
@@ -556,6 +634,26 @@ export class SqliteRoomRegistry {
     return players.map((player): RoomPlayer => ({ id: player.id, name: player.name, joinedAt: player.joined_at }));
   }
 
+  private requireRoomPlayer(roomId: string, playerId: string): RoomPlayer {
+    const normalizedPlayerId = cleanText(playerId, "", 100);
+    const player = this.database.prepare("SELECT id, name, joined_at FROM room_players WHERE room_id = ? AND id = ?").get(roomId, normalizedPlayerId) as unknown as PlayerRow | undefined;
+    if (!player) throw new RoomError("Enter this table before using its chat.");
+    return { id: player.id, name: player.name, joinedAt: player.joined_at };
+  }
+
+  private mapChatMessage(row: ChatMessageRow, inviteCode?: string): ChatMessage {
+    return { id: row.id, channel: row.channel, inviteCode, playerId: row.player_id, playerName: row.player_name, body: row.body, sentAt: row.sent_at };
+  }
+
+  private trimChat(channel: "lobby" | "room", roomId?: string): void {
+    if (channel === "lobby") {
+      this.database.exec("DELETE FROM chat_messages WHERE channel = 'lobby' AND id NOT IN (SELECT id FROM chat_messages WHERE channel = 'lobby' ORDER BY sent_at DESC LIMIT 100)");
+      return;
+    }
+    if (!roomId) return;
+    this.database.prepare("DELETE FROM chat_messages WHERE channel = 'room' AND room_id = ? AND id NOT IN (SELECT id FROM chat_messages WHERE channel = 'room' AND room_id = ? ORDER BY sent_at DESC LIMIT 100)").run(roomId, roomId);
+  }
+
   private saveMatch(roomId: string, match: MatchState): void {
     this.database.exec("BEGIN IMMEDIATE");
     try {
@@ -589,6 +687,12 @@ function cleanText(value: string | undefined, fallback: string, maxLength: numbe
   return cleaned || fallback;
 }
 
+function cleanChatBody(value: unknown): string {
+  const body = typeof value === "string" ? value.trim().replace(/\s+/g, " ").slice(0, 280) : "";
+  if (!body) throw new RoomError("Write a message before sending it.");
+  return body;
+}
+
 function actionMessage(playerName: string, action: Exclude<GameAction, { type: "start" } | { type: "confirm-table-active" }>): string {
   switch (action.type) {
     case "peek": return `${playerName} peeked at two cards.`;
@@ -596,6 +700,7 @@ function actionMessage(playerName: string, action: Exclude<GameAction, { type: "
     case "take-discard": return `${playerName} took the discard card.`;
     case "replace": return `${playerName} replaced a card.`;
     case "discard-drawn": return `${playerName} discarded the drawn card.`;
+    case "keep-drawn": return `${playerName} kept the drawn card.`;
     case "use-swap-power": return `${playerName} used an 8 power.`;
     case "use-peek-power": return `${playerName} inspected a card.`;
     case "skip-power": return `${playerName} skipped a power card.`;

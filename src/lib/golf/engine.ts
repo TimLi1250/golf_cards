@@ -20,6 +20,10 @@ export type PowerRank = "8" | "J" | "Q";
 export type PendingPower = {
   rank: PowerRank;
   playerId: string;
+  /** A power remains open briefly after use so its owner can call a matching card. */
+  used?: boolean;
+  /** Matched powers are resolved between normal turns, so they do not advance one. */
+  endsTurn?: boolean;
 };
 
 export type PendingMatchGift = {
@@ -44,6 +48,7 @@ export type HoleState = {
   currentPlayerIndex: number;
   heldCard?: { card: Card; source: CardSource };
   pendingPower?: PendingPower;
+  pendingPowerQueue?: PendingPower[];
   pendingMatchGift?: PendingMatchGift;
   peekedPlayerIds: string[];
   knockerId?: string;
@@ -68,7 +73,7 @@ export type MatchEvent = {
   id: string;
   message: string;
   playerId?: string;
-  type?: "start" | "peek" | "draw-stock" | "take-discard" | "replace" | "discard-drawn" | "knock" | "finalize-knock" | "next-hole" | "leave" | "power-swap" | "power-peek" | "skip-power" | "match-own" | "match-other";
+  type?: "start" | "peek" | "draw-stock" | "take-discard" | "replace" | "discard-drawn" | "keep-drawn" | "knock" | "finalize-knock" | "next-hole" | "leave" | "power-swap" | "power-peek" | "skip-power" | "match-own" | "match-other";
   layoutIndex?: number;
   affectedCards?: { playerId: string; layoutIndex: number }[];
 };
@@ -218,6 +223,23 @@ export function discardDrawnStockCard(match: MatchState, playerId: string): void
   resolveDiscardPowerOrEndTurn(match, playerId, heldCard.card);
 }
 
+/** Keeps a stock draw when the player has no layout cards left (for example, a Joker). */
+export function keepDrawnCard(match: MatchState, playerId: string): void {
+  assertPlaying(match);
+  assertTurn(match, playerId);
+  const heldCard = match.hole.heldCard;
+  if (!heldCard || heldCard.source !== "stock") {
+    throw new GolfRuleError("Draw a stock card before choosing whether to keep it.");
+  }
+  const layout = match.hole.layouts[playerId];
+  if (layout.some(Boolean)) throw new GolfRuleError("You may only keep a draw when you have no cards left.");
+  const emptyIndex = layout.findIndex((card) => !card);
+  if (emptyIndex === -1) throw new GolfRuleError("There is no empty place for this card.");
+  layout[emptyIndex] = heldCard.card;
+  match.hole.heldCard = undefined;
+  endTurn(match, playerId);
+}
+
 /** Uses an eight that was just discarded to swap two unknown layout cards. */
 export function resolveSwapPower(match: MatchState, playerId: string, first?: LayoutCardReference, second?: LayoutCardReference): void {
   assertPendingPower(match, playerId, "8");
@@ -232,8 +254,7 @@ export function resolveSwapPower(match: MatchState, playerId: string, first?: La
     const secondLayout = match.hole.layouts[second.playerId];
     [firstLayout[first.layoutIndex], secondLayout[second.layoutIndex]] = [secondLayout[second.layoutIndex], firstLayout[first.layoutIndex]];
   }
-  match.hole.pendingPower = undefined;
-  endTurn(match, playerId);
+  completePower(match, playerId);
 }
 
 /** Uses a Jack or Queen to privately inspect an eligible layout card. */
@@ -246,16 +267,16 @@ export function resolvePeekPower(match: MatchState, playerId: string, target: La
   }
   const card = match.hole.layouts[target.playerId][target.layoutIndex];
   if (!card) throw new GolfRuleError("Choose a card that is still on the table.");
-  match.hole.pendingPower = undefined;
-  endTurn(match, playerId);
+  // Leave a private-reveal power open after the reveal. This lets a player
+  // who just spotted a matching J/Q call it before continuing.
+  match.hole.pendingPower!.used = true;
   return card;
 }
 
 /** Declines the optional action from a just-discarded power card. */
 export function skipPower(match: MatchState, playerId: string): void {
-  assertPendingPower(match, playerId);
-  match.hole.pendingPower = undefined;
-  endTurn(match, playerId);
+  assertPendingPower(match, playerId, undefined, true);
+  completePower(match, playerId);
 }
 
 /**
@@ -283,6 +304,7 @@ export function matchDiscard(match: MatchState, playerId: string, layoutIndex: n
   if (!matched) throw new GolfRuleError("Choose a card that is still on the table.");
   match.hole.layouts[playerId][layoutIndex] = null;
   match.hole.discard.push(matched);
+  queueMatchedPower(match, playerId, matched);
   return { correct: true, discarded: matched };
 }
 
@@ -321,6 +343,7 @@ export function giveMatchCard(match: MatchState, playerId: string, layoutIndex: 
   match.hole.layouts[pendingGift.targetPlayerId][pendingGift.targetLayoutIndex] = given;
   match.hole.discard.push(pendingGift.matchedCard);
   match.hole.pendingMatchGift = undefined;
+  queueMatchedPower(match, playerId, pendingGift.matchedCard);
 }
 
 export function knock(match: MatchState, playerId: string): void {
@@ -392,6 +415,11 @@ export function eliminatePlayer(match: MatchState, playerId: string): { remainin
   assertActivePlayer(match, playerId);
   const { hole } = match;
   match.eliminatedPlayerIds = [...(match.eliminatedPlayerIds ?? []), playerId];
+  if (hole.pendingPower?.playerId === playerId) {
+    hole.pendingPower = undefined;
+    activateQueuedPower(match);
+  }
+  hole.pendingPowerQueue = hole.pendingPowerQueue?.filter((power) => power.playerId !== playerId);
   if (hole.finalTurnQueue) hole.finalTurnQueue = hole.finalTurnQueue.filter((id) => id !== playerId);
 
   const remainingActivePlayers = activePlayers(match).length;
@@ -406,8 +434,9 @@ export function eliminatePlayer(match: MatchState, playerId: string): { remainin
       match.status = "finished";
       return { remainingActivePlayers, finished: true, winnerId: winner.id, advanced: false };
     }
-    startNextHole(match);
-    return { remainingActivePlayers, finished: false, winnerId: winner.id, advanced: true };
+    // Keep the scored hole on the table so everyone can see every hand before
+    // the next deal. The next-hole action starts the following round.
+    return { remainingActivePlayers, finished: false, winnerId: winner.id, advanced: false };
   }
 
   if (currentPlayer(match).id === playerId) {
@@ -448,6 +477,7 @@ export function removePlayer(match: MatchState, playerId: string): { remainingPl
   if (hole.knockerId === playerId) hole.knockerId = undefined;
   match.eliminatedPlayerIds = (match.eliminatedPlayerIds ?? []).filter((id) => id !== playerId);
   if (clearedPendingPower) hole.pendingPower = undefined;
+  hole.pendingPowerQueue = hole.pendingPowerQueue?.filter((power) => power.playerId !== playerId);
   if (hole.finalTurnQueue) hole.finalTurnQueue = hole.finalTurnQueue.filter((id) => id !== playerId);
 
   if (activePlayers(match).length < 2) {
@@ -469,6 +499,12 @@ export function removePlayer(match: MatchState, playerId: string): { remainingPl
   if (hole.knockerId) hole.knockerId = idMap.get(hole.knockerId);
   if (match.eliminatedPlayerIds) match.eliminatedPlayerIds = match.eliminatedPlayerIds.map((id) => idMap.get(id) ?? id);
   if (hole.pendingPower) hole.pendingPower.playerId = idMap.get(hole.pendingPower.playerId) ?? hole.pendingPower.playerId;
+  if (hole.pendingPowerQueue) {
+    hole.pendingPowerQueue = hole.pendingPowerQueue.map((power) => ({
+      ...power,
+      playerId: idMap.get(power.playerId) ?? power.playerId,
+    }));
+  }
   if (hole.pendingMatchGift) {
     hole.pendingMatchGift.playerId = idMap.get(hole.pendingMatchGift.playerId) ?? hole.pendingMatchGift.playerId;
     hole.pendingMatchGift.targetPlayerId = idMap.get(hole.pendingMatchGift.targetPlayerId) ?? hole.pendingMatchGift.targetPlayerId;
@@ -506,9 +542,11 @@ function endTurn(match: MatchState, playerId: string): void {
       return;
     }
     hole.currentPlayerIndex = players.findIndex((player) => player.id === hole.finalTurnQueue?.[0]);
+    activateQueuedPower(match);
     return;
   }
   hole.currentPlayerIndex = nextActivePlayerIndex(match, hole.currentPlayerIndex);
+  activateQueuedPower(match);
 }
 
 function turnOrderAfter(players: Player[], index: number): string[] {
@@ -554,8 +592,12 @@ function assertMatchingAvailable(match: MatchState): void {
   if (match.hole.finalMatchDeadline && Date.now() >= match.hole.finalMatchDeadline) {
     throw new GolfRuleError("The final matching window has closed.");
   }
-  if (match.hole.heldCard || match.hole.pendingPower || match.hole.pendingMatchGift) {
-    throw new GolfRuleError("Finish the current play before calling a match.");
+  // A held stock card or another player's pending power never changes the
+  // face-up discard. Matches are therefore legal during either state. An
+  // opponent-match gift is the one exception: its empty slot must be filled
+  // before another match can safely change the discard pile.
+  if (match.hole.pendingMatchGift) {
+    throw new GolfRuleError("Finish the matching-card gift before calling another match.");
   }
 }
 
@@ -600,15 +642,51 @@ function resolveDiscardPowerOrEndTurn(match: MatchState, playerId: string, disca
   endTurn(match, playerId);
 }
 
+/**
+ * A matched power card is resolved after the turn/power already in progress.
+ * This preserves the order of play while allowing rapid calls against the
+ * current discard (including several eights in a row).
+ */
+function queueMatchedPower(match: MatchState, playerId: string, card: Card): void {
+  if (!isPowerCard(card)) return;
+  match.hole.pendingPowerQueue ??= [];
+  match.hole.pendingPowerQueue.push({ rank: card.rank, playerId, endsTurn: false });
+}
+
+function completePower(match: MatchState, playerId: string): void {
+  const power = match.hole.pendingPower;
+  if (!power || power.playerId !== playerId) throw new GolfRuleError("There is no power card waiting for you.");
+  match.hole.pendingPower = undefined;
+  if (power.endsTurn === false) {
+    activateQueuedPower(match);
+    return;
+  }
+  endTurn(match, playerId);
+}
+
+function activateQueuedPower(match: MatchState): void {
+  const { hole } = match;
+  if (hole.pendingPower || hole.finalMatchDeadline) return;
+  while (hole.pendingPowerQueue?.length) {
+    const next = hole.pendingPowerQueue.shift();
+    if (next && !isEliminated(match, next.playerId) && match.players.some((player) => player.id === next.playerId)) {
+      hole.pendingPower = next;
+      break;
+    }
+  }
+  if (hole.pendingPowerQueue?.length === 0) hole.pendingPowerQueue = undefined;
+}
+
 function isPowerCard(card: Card): card is Card & { rank: PowerRank } {
   return card.rank === "8" || card.rank === "J" || card.rank === "Q";
 }
 
-function assertPendingPower(match: MatchState, playerId: string, expectedRank?: PowerRank): PendingPower {
+function assertPendingPower(match: MatchState, playerId: string, expectedRank?: PowerRank, allowUsed = false): PendingPower {
   assertPlaying(match);
-  assertTurn(match, playerId);
+  assertActivePlayer(match, playerId);
   const power = match.hole.pendingPower;
   if (!power || power.playerId !== playerId) throw new GolfRuleError("There is no power card waiting for you.");
+  if (power.used && !allowUsed) throw new GolfRuleError("Continue the turn after using this power card.");
   if (expectedRank && power.rank !== expectedRank) throw new GolfRuleError(`The ${power.rank} power must be resolved instead.`);
   return power;
 }

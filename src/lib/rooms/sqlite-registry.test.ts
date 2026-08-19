@@ -28,6 +28,28 @@ test("persists rooms when a fresh registry opens the same database", () => {
   }
 });
 
+test("stores chat history and keeps table chat private to seated players", () => {
+  const directory = mkdtempSync(join(tmpdir(), "fairway-four-chat-"));
+  const databasePath = join(directory, "rooms.sqlite");
+  const registry = new SqliteRoomRegistry(databasePath);
+  try {
+    const room = registry.create({ host: "Avery", hostId: "player-a", playerLimit: 2 });
+    registry.join(room.inviteCode, { playerId: "player-b", playerName: "Blake" });
+    const lobbyMessage = registry.postLobbyChat({ playerId: "player-a", playerName: "Avery", body: "Welcome to the clubhouse" });
+    const roomMessage = registry.postRoomChat(room.inviteCode, { playerId: "player-b", body: "Ready to play" });
+
+    assert.equal(registry.lobbyChat()[0].body, "Welcome to the clubhouse");
+    assert.equal(registry.lobbyChat()[0].id, lobbyMessage.id);
+    assert.equal(registry.roomChat(room.inviteCode, "player-a")[0].body, "Ready to play");
+    assert.equal(registry.roomChat(room.inviteCode, "player-b")[0].id, roomMessage.id);
+    assert.throws(() => registry.roomChat(room.inviteCode, "player-c"));
+    assert.throws(() => registry.postRoomChat(room.inviteCode, { playerId: "player-c", body: "Let me in" }));
+  } finally {
+    registry.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("stores an authoritative game while keeping layout card faces private", () => {
   const directory = mkdtempSync(join(tmpdir(), "fairway-four-game-"));
   const registry = new SqliteRoomRegistry(join(directory, "rooms.sqlite"));

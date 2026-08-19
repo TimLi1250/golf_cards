@@ -1,21 +1,24 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { appAudioContext } from "../lib/browser-audio";
 
 type GameAudioProps = {
-  playing: boolean;
+  active: boolean;
+  knock: boolean;
 };
 
-const MUSIC_NOTES = [329.63, 392, 493.88, 392, 293.66, 392, 440, 392];
-const BASS_NOTES = [82.41, 82.41, 98, 98, 73.42, 73.42, 82.41, 82.41];
+const MUSIC_NOTES = [659.25, 783.99, 987.77, 783.99, 659.25, 587.33, 659.25, 739.99, 880, 987.77, 880, 783.99, 659.25, 587.33, 493.88, 587.33];
+const BASS_NOTES = [164.81, 164.81, 164.81, 164.81, 146.83, 146.83, 146.83, 146.83, 130.81, 130.81, 130.81, 130.81, 146.83, 146.83, 164.81, 164.81];
+const HARMONY_NOTES = [0, 0, 0, 0, 493.88, 0, 0, 0, 659.25, 0, 0, 0, 587.33, 0, 0, 0];
 
 /** Synthesized game audio avoids network-loaded audio files and works offline. */
-export default function GameAudio({ playing }: GameAudioProps) {
-  const context = useRef<AudioContext | undefined>(undefined);
+export default function GameAudio({ active, knock }: GameAudioProps) {
   const musicTimer = useRef<number | undefined>(undefined);
   const noteIndex = useRef(0);
   const enabledRef = useRef(true);
-  const playingRef = useRef(playing);
+  const activeRef = useRef(active);
+  const knockRef = useRef(knock);
   const [enabled, setEnabled] = useState(true);
   const [preferenceReady, setPreferenceReady] = useState(false);
 
@@ -25,7 +28,7 @@ export default function GameAudio({ playing }: GameAudioProps) {
   }, []);
 
   const playTone = useCallback((frequency: number, duration: number, volume: number, type: OscillatorType = "square") => {
-    const audio = context.current;
+    const audio = appAudioContext();
     if (!audio || audio.state !== "running") return;
     const oscillator = audio.createOscillator();
     const gain = audio.createGain();
@@ -41,23 +44,26 @@ export default function GameAudio({ playing }: GameAudioProps) {
   }, []);
 
   const startMusic = useCallback(() => {
-    if (musicTimer.current || !enabledRef.current || !playingRef.current) return;
+    if (musicTimer.current || !enabledRef.current || !activeRef.current) return;
     const playStep = () => {
       const index = noteIndex.current % MUSIC_NOTES.length;
-      playTone(MUSIC_NOTES[index], 0.23, 0.018);
-      if (index % 2 === 0) playTone(BASS_NOTES[index], 0.3, 0.011, "triangle");
+      const fast = knockRef.current;
+      playTone(MUSIC_NOTES[index], fast ? 0.15 : 0.22, fast ? 0.022 : 0.018);
+      if (index % 2 === 0) playTone(BASS_NOTES[index], fast ? 0.2 : 0.28, fast ? 0.017 : 0.011, "triangle");
+      if (HARMONY_NOTES[index]) playTone(HARMONY_NOTES[index], fast ? 0.13 : 0.19, 0.009, "square");
       noteIndex.current += 1;
     };
     playStep();
-    musicTimer.current = window.setInterval(playStep, 360);
+    musicTimer.current = window.setInterval(playStep, knockRef.current ? 205 : 300);
   }, [playTone]);
 
   const unlockAudio = useCallback(async () => {
     if (!enabledRef.current) return;
-    if (!context.current || context.current.state === "closed") context.current = new AudioContext();
+    const audio = appAudioContext();
+    if (!audio) return;
     try {
-      await context.current.resume();
-      if (playingRef.current) startMusic();
+      await audio.resume();
+      if (activeRef.current) startMusic();
     } catch {
       // Audio is optional. Some browsers can reject sound while backgrounded.
     }
@@ -78,14 +84,15 @@ export default function GameAudio({ playing }: GameAudioProps) {
     enabledRef.current = enabled;
     if (preferenceReady) window.localStorage.setItem("golf-sound-enabled", String(enabled));
     if (!enabled) stopMusic();
-    else if (playing && context.current?.state === "running") startMusic();
-  }, [enabled, playing, preferenceReady, startMusic, stopMusic]);
+    else if (active && appAudioContext()?.state === "running") startMusic();
+  }, [active, enabled, preferenceReady, startMusic, stopMusic]);
 
   useEffect(() => {
-    playingRef.current = playing;
-    if (!playing) stopMusic();
-    else if (enabledRef.current && context.current?.state === "running") startMusic();
-  }, [playing, startMusic, stopMusic]);
+    activeRef.current = active;
+    knockRef.current = knock;
+    stopMusic();
+    if (active && enabledRef.current && appAudioContext()?.state === "running") startMusic();
+  }, [active, knock, startMusic, stopMusic]);
 
   useEffect(() => {
     const unlockOnGameInteraction = (event: MouseEvent) => {
@@ -97,7 +104,6 @@ export default function GameAudio({ playing }: GameAudioProps) {
     return () => {
       document.removeEventListener("click", unlockOnGameInteraction);
       stopMusic();
-      void context.current?.close();
     };
   }, [stopMusic, unlockAudio]);
 

@@ -4,12 +4,14 @@ import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { type CSSProperties, FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { io } from "socket.io-client";
+import ChatPanel from "../../../components/chat-panel";
 import GameAudio from "../../../components/game-audio";
 import type { GameAction, GameView, PublicCard } from "../../../lib/golf/protocol";
 import { copyText, playerProfile, savePlayerName } from "../../../lib/player-session";
 
 type GameResponse = { view?: GameView; needsEntry?: boolean; privatePeek?: PublicCard[]; privatePowerPeek?: { playerId: string; layoutIndex: number; card: PublicCard }; privateSelfReveal?: (PublicCard | null)[]; error?: string };
 type RecentReplacement = { eventId: string; layoutIndex: number; card: PublicCard };
+type RecentPublicReplacement = { eventId: string; playerId: string; layoutIndex: number; card: PublicCard };
 type RecentPeek = { eventId: string; cards: PublicCard[] };
 type RecentPowerPeek = { eventId: string; playerId: string; layoutIndex: number; card: PublicCard };
 type CardSelection = { playerId: string; layoutIndex: number };
@@ -36,9 +38,11 @@ export default function GamePage() {
   const [disconnectDeadlines, setDisconnectDeadlines] = useState<Record<string, number>>({});
   const [presenceNow, setPresenceNow] = useState(() => Date.now());
   const [recentReplacement, setRecentReplacement] = useState<RecentReplacement>();
+  const [recentPublicReplacement, setRecentPublicReplacement] = useState<RecentPublicReplacement>();
   const [leaveConfirmation, setLeaveConfirmation] = useState(false);
   const [finalSeconds, setFinalSeconds] = useState(0);
   const [inactivitySeconds, setInactivitySeconds] = useState(30);
+  const [gameOverSeconds, setGameOverSeconds] = useState(30);
   const [peekClosing, setPeekClosing] = useState(false);
   const [isMobileTable, setIsMobileTable] = useState(false);
   const isLeaving = useRef(false);
@@ -46,11 +50,27 @@ export default function GamePage() {
   const peekCloseTimer = useRef<number>(undefined);
   const swapCardElements = useRef(new Map<string, HTMLButtonElement>());
   const handledSwapEventId = useRef<string>(undefined);
+  const handledReplacementEventId = useRef<string>(undefined);
   const swapClearTimer = useRef<number>(undefined);
+  const replacementFlipTimer = useRef<number>(undefined);
   const discardAttempt = useRef<CardSelection>(undefined);
   const discardAttemptTimer = useRef<number>(undefined);
   const discardAttemptLocked = useRef(false);
   const hasJoinedTable = Boolean(view);
+
+  const leaveTable = useCallback(async () => {
+    if (isLeaving.current) return;
+    isLeaving.current = true;
+    try {
+      await fetch(`/api/rooms/${inviteCode}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ playerId: playerProfile().id }),
+      });
+    } finally {
+      router.push("/");
+    }
+  }, [inviteCode, router]);
 
   useEffect(() => {
     const event = view?.game?.lastEvent;
@@ -88,6 +108,16 @@ export default function GamePage() {
     });
     return () => window.cancelAnimationFrame(animationFrame);
   }, [view?.game?.lastEvent]);
+
+  useEffect(() => {
+    const event = view?.game?.lastEvent;
+    const discardedCard = view?.game?.discard;
+    if (!event?.id || event.type !== "replace" || !event.playerId || event.layoutIndex === undefined || !discardedCard || handledReplacementEventId.current === event.id) return;
+    handledReplacementEventId.current = event.id;
+    if (replacementFlipTimer.current) window.clearTimeout(replacementFlipTimer.current);
+    setRecentPublicReplacement({ eventId: event.id, playerId: event.playerId, layoutIndex: event.layoutIndex, card: discardedCard });
+    replacementFlipTimer.current = window.setTimeout(() => setRecentPublicReplacement((current) => current?.eventId === event.id ? undefined : current), 700);
+  }, [view?.game?.discard, view?.game?.lastEvent]);
 
   const closePeek = useCallback(() => {
     if (peekClosingRef.current) return;
@@ -207,6 +237,20 @@ export default function GamePage() {
   }, [view?.game?.inactivityDeadline]);
 
   useEffect(() => {
+    if (view?.game?.phase !== "finished") return;
+    const deadline = Date.now() + 30_000;
+    const update = () => setGameOverSeconds(Math.max(0, Math.ceil((deadline - Date.now()) / 1_000)));
+    const initialUpdate = window.setTimeout(update, 0);
+    const countdown = window.setInterval(update, 250);
+    const returnTimer = window.setTimeout(() => void leaveTable(), 30_000);
+    return () => {
+      window.clearTimeout(initialUpdate);
+      window.clearInterval(countdown);
+      window.clearTimeout(returnTimer);
+    };
+  }, [leaveTable, view?.game?.phase]);
+
+  useEffect(() => {
     if (!recentPeek && !recentPowerPeek) return;
     const timer = window.setTimeout(closePeek, 5_000);
     return () => window.clearTimeout(timer);
@@ -245,20 +289,6 @@ export default function GamePage() {
       window.setTimeout(() => setLinkCopied(false), 1_600);
     } catch {
       setError("Copy the address from your browser to share this game.");
-    }
-  }
-
-  async function leaveTable() {
-    if (isLeaving.current) return;
-    isLeaving.current = true;
-    try {
-      await fetch(`/api/rooms/${inviteCode}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ playerId: playerProfile().id }),
-      });
-    } finally {
-      router.push("/");
     }
   }
 
@@ -327,6 +357,9 @@ export default function GamePage() {
   if (!view) return <main className="game-loading"><p>CONNECTING TO TABLE…</p>{error && <small>{error}</small>}</main>;
   const game = view.game;
   const seatedPlayers = game ? arrangeSeats(game.players) : [];
+  const canDrawFromStock = Boolean(game?.canAct && !game.heldCard && !game.pendingPower);
+  const canUseDiscardPile = Boolean(game && ((game.canAct && game.heldCard && game.heldCardSource === "stock") || (canDrawFromStock && game.discard)));
+  const canKeepDrawnCard = Boolean(game?.canAct && game.heldCard && game.heldCardSource === "stock" && game.players.find((player) => player.isYou)?.cardCount === 0);
 
   function handleCardClick(playerId: string, isYou: boolean, isOut: boolean, layoutIndex: number) {
     if (!game || game.phase !== "playing") return;
@@ -356,16 +389,19 @@ export default function GamePage() {
     void confirmDiscardAttempt({ playerId, layoutIndex }, isYou);
   }
 
+  const finalWinnerScore = game?.phase === "finished" ? Math.max(...game.players.map((player) => player.totalScore)) : 0;
+  const finalWinners = game?.phase === "finished" ? game.players.filter((player) => player.totalScore === finalWinnerScore) : [];
+  const knockActive = Boolean(game?.knockerName && game.phase === "playing");
+
   return <main className="game-screen">
-    {game?.knockerName && game.phase === "playing" && <section className="knock-banner"><div><span>◆ {game.knockerName.toUpperCase()} CALLED KNOCK — {game.finalMatchDeadline ? `MATCHING CLOSES IN ${finalSeconds}` : "FINAL TURNS"} ◆</span><span aria-hidden="true">◆ {game.knockerName.toUpperCase()} CALLED KNOCK — {game.finalMatchDeadline ? `MATCHING CLOSES IN ${finalSeconds}` : "FINAL TURNS"} ◆</span></div></section>}
-    <header className="game-header"><Link href="/" className="back-link" onClick={(event) => { event.preventDefault(); if (game) setLeaveConfirmation(true); else void leaveTable(); }}>← LOBBY</Link><div><strong>{view.room.name}</strong><small className="game-invite-code">{view.room.inviteCode}</small></div><div className="game-header-actions"><GameAudio playing={game?.phase === "playing"} /><button className="copy-game-link" onClick={() => void copyGameLink()}>{linkCopied ? "LINK COPIED" : "COPY GAME LINK"}</button></div></header>
+    <header className="game-header"><Link href="/" className="back-link" onClick={(event) => { event.preventDefault(); if (game) setLeaveConfirmation(true); else void leaveTable(); }}>← LOBBY</Link><div><strong>{view.room.name}</strong><small className="game-invite-code">{view.room.inviteCode}</small></div><div className="game-header-actions"><GameAudio active={Boolean(view) && game?.phase !== "finished"} knock={knockActive} /><button className="copy-game-link" onClick={() => void copyGameLink()}>{linkCopied ? "LINK COPIED" : "COPY GAME LINK"}</button></div></header>
     {!game ? <section className="start-panel"><p>TABLE LOBBY</p><h1>{view.room.name}</h1><div className="waiting-players">{view.room.players.map((player) => <span key={player.id}>{player.name}</span>)}</div>{view.canStart ? <button onClick={() => sendAction({ type: "start" })}>START GAME →</button> : <p className="wait-copy">Waiting for {view.room.players[0]?.name} to start the game.</p>}{error && <p className="game-error">{error}</p>}</section> : <>
       <section className="table-status"><span>{game.phase === "finished" ? "GAME OVER" : game.isPeeking ? `PEEK PHASE ${game.peekedPlayers}/${game.activePlayerCount}` : game.phase === "scored" ? `${game.holeWinnerName || "A PLAYER"} WINS${game.tieBreakRounds ? ` AFTER ${game.tieBreakRounds} TIE-BREAK${game.tieBreakRounds > 1 ? "S" : ""}` : ""}` : game.finalMatchDeadline ? "FINAL MATCHING WINDOW" : game.currentPlayerName === "" ? "" : `${game.currentPlayerName}'S TURN`}</span><span>STOCK {game.stockCount}</span>{game.knockerName && <span>{game.knockerName} KNOCKED</span>}</section>
       {game.phase === "scored" && game.tieBreaks?.map((round, roundIndex) => <section className="tie-break-results" key={roundIndex}><b>TIE BREAK {roundIndex + 1}</b>{round.map(({ playerName, card }) => <span key={`${playerName}-${card.rank}-${card.suit}`}><small>{playerName}</small><Card card={card} /></span>)}</section>)}
       <section className="scoreboard" aria-label="Scoreboard"><span>HOLE WINS</span>{seatedPlayers.map((player) => <div className={`${player.isYou ? "is-you" : ""} ${player.isOut ? "is-out" : ""}`} key={player.id}><b>{player.name}{player.isYou ? " (YOU)" : ""}</b><strong>{player.isOut ? "OUT" : player.totalScore}</strong></div>)}</section>
-      <section className={`digital-table circular-table ${seatedPlayers.length > 8 ? "seating-dense" : seatedPlayers.length > 5 ? "seating-compact" : ""}`}>
+      <section className={`digital-table circular-table ${knockActive ? "knock-active" : ""} ${seatedPlayers.length > 8 ? "seating-dense" : seatedPlayers.length > 5 ? "seating-compact" : ""}`} aria-label={knockActive ? `${game.knockerName} called knock` : "Game table"}>
         <div className="center-table">
-          <div className="center-piles"><div><p>STOCK</p><div key={game.lastEvent?.type === "draw-stock" ? game.lastEvent.id : "stock"} className={`stock-card ${game.lastEvent?.type === "draw-stock" ? "action-card-highlight" : ""}`}>?</div></div><div><p>DISCARD</p>{game.discard && <span key={["take-discard", "replace", "discard-drawn"].includes(game.lastEvent?.type || "") ? game.lastEvent?.id : "discard"} className={["take-discard", "replace", "discard-drawn"].includes(game.lastEvent?.type || "") ? "action-card-highlight" : ""}><Card card={game.discard} /></span>}</div></div>
+          <div className="center-piles"><div><p>STOCK</p><button type="button" aria-label="Draw from stock" disabled={!canDrawFromStock} onClick={() => void sendAction({ type: "draw-stock" })} key={game.lastEvent?.type === "draw-stock" ? game.lastEvent.id : "stock"} className={`center-pile-button stock-card ${game.lastEvent?.type === "draw-stock" ? "action-card-highlight" : ""}`}>?</button></div><div><p>DISCARD</p>{game.discard && <button type="button" aria-label={game.heldCardSource === "stock" ? "Discard drawn card" : "Take discard"} disabled={!canUseDiscardPile} onClick={() => void sendAction(game.heldCardSource === "stock" && game.heldCard ? { type: "discard-drawn" } : { type: "take-discard" })} className={`center-pile-button ${["take-discard", "replace", "discard-drawn"].includes(game.lastEvent?.type || "") ? "action-card-highlight" : ""}`} key={["take-discard", "replace", "discard-drawn"].includes(game.lastEvent?.type || "") ? game.lastEvent?.id : "discard"}><Card card={game.discard} /></button>}</div></div>
           {game.finalMatchDeadline ? <div className="table-activity final-match-call"><strong>FINAL CALL TO MATCH THE DISCARD - {finalSeconds}S</strong></div> : <div className="table-activity" key={game.lastEvent?.id || "opening-play"}><span>TABLE FEED</span><strong>{game.lastEvent?.message || "Cards are on the table."}</strong><small>{game.currentPlayerName ? `${game.currentPlayerName.toUpperCase()} IS UP` : "WAITING FOR THE NEXT PLAY"}</small></div>}
         </div>
         {seatedPlayers.map((player, index) => <article className={`table-player table-seat ${player.isYou ? "is-you" : ""} ${player.isOut ? "is-out" : ""} ${player.isYou && privateSelfReveal ? "self-revealed" : ""} ${game.lastEvent?.playerId === player.id && ["peek", "knock"].includes(game.lastEvent.type || "") ? "action-player-highlight" : ""}`} style={seatPosition(index, seatedPlayers.length, isMobileTable)} key={player.id}><header><span><i className={`presence-dot ${connectedPlayerIds.has(player.id) ? "online" : ""}`} />{player.name}{player.isYou ? " (YOU)" : ""}</span>{player.isOut ? <b>OUT</b> : player.score !== undefined && <b>{player.score} PTS</b>}</header>{disconnectDeadlines[player.id] && <small className="disconnect-countdown">DISCONNECTED… REMOVING IN {Math.max(0, Math.ceil((disconnectDeadlines[player.id] - presenceNow) / 1_000))}S</small>}<div className="layout-cards">{player.cards.map((card, cardIndex) => {
@@ -374,16 +410,17 @@ export default function GamePage() {
           const powerAffected = game.lastEvent?.affectedCards?.some((affected) => affected.playerId === player.id && affected.layoutIndex === cardIndex);
           const highlighted = replacement || peekedCard || powerAffected;
           const replacementCard = player.isYou && replacement && recentReplacement && recentReplacement.eventId === game.lastEvent?.id && recentReplacement.layoutIndex === cardIndex ? recentReplacement.card : undefined;
+          const publicReplacementCard = replacement && recentPublicReplacement?.eventId === game.lastEvent?.id && recentPublicReplacement?.playerId === player.id && recentPublicReplacement?.layoutIndex === cardIndex ? recentPublicReplacement.card : undefined;
           const peekCard = player.isYou && cardIndex >= 2 && recentPeek ? recentPeek.cards[cardIndex - 2] : undefined;
           const powerPeekCard = recentPowerPeek && recentPowerPeek.playerId === player.id && recentPowerPeek.layoutIndex === cardIndex ? recentPowerPeek.card : undefined;
           const selectedForSwap = powerSwapSelection?.playerId === player.id && powerSwapSelection.layoutIndex === cardIndex;
           const discardAttemptArmed = discardAttemptSelection?.playerId === player.id && discardAttemptSelection.layoutIndex === cardIndex;
-          const displayedCard = player.isYou && privateSelfReveal ? privateSelfReveal[cardIndex] : replacementCard || peekCard || powerPeekCard || card;
+          const displayedCard = player.isYou && privateSelfReveal ? privateSelfReveal[cardIndex] : publicReplacementCard || replacementCard || peekCard || powerPeekCard || card;
           const empty = player.isYou && privateSelfReveal ? !privateSelfReveal[cardIndex] : !player.occupiedSlots[cardIndex];
           const canSelect = !player.isOut && game.phase === "playing" && (game.canUsePower || (game.canGiveMatchCard && player.isYou) || (player.isYou && game.canAct && game.heldCard) || game.canMatch);
           const cardSelection = { playerId: player.id, layoutIndex: cardIndex };
           const swapMarked = recentSwap?.cards.some((affected) => affected.playerId === player.id && affected.layoutIndex === cardIndex);
-          return <button ref={(element) => { const key = cardSlotKey(cardSelection); if (element) swapCardElements.current.set(key, element); else swapCardElements.current.delete(key); }} key={cardIndex} disabled={!canSelect || !player.occupiedSlots[cardIndex]} onClick={() => handleCardClick(player.id, player.isYou, player.isOut, cardIndex)} className={`layout-card ${highlighted ? "action-card-highlight" : ""} ${replacementCard ? "placed-card" : ""} ${peekCard || powerPeekCard ? `peeked-card ${peekClosing ? "peek-closing" : ""}` : ""} ${selectedForSwap ? "selected-table-card" : ""} ${swapMarked ? "swap-marked-card" : ""} ${discardAttemptArmed ? "discard-attempt-armed" : ""}`}><Card card={displayedCard} empty={empty} />{swapMarked && <span className="swap-card-badge" aria-label="Recently swapped">↔</span>}{discardAttemptArmed && <span className="discard-attempt-badge" aria-hidden="true">2×</span>}</button>;
+          return <button ref={(element) => { const key = cardSlotKey(cardSelection); if (element) swapCardElements.current.set(key, element); else swapCardElements.current.delete(key); }} key={cardIndex} disabled={!canSelect || !player.occupiedSlots[cardIndex]} onClick={() => handleCardClick(player.id, player.isYou, player.isOut, cardIndex)} className={`layout-card ${highlighted ? "action-card-highlight" : ""} ${replacementCard ? "placed-card" : ""} ${publicReplacementCard ? "public-replacement-flip" : ""} ${peekCard || powerPeekCard ? `peeked-card ${peekClosing ? "peek-closing" : ""}` : ""} ${selectedForSwap ? "selected-table-card" : ""} ${swapMarked ? "swap-marked-card" : ""} ${discardAttemptArmed ? "discard-attempt-armed" : ""}`}><Card card={displayedCard} empty={empty} />{swapMarked && <span className="swap-card-badge" aria-label="Recently swapped">↔</span>}{discardAttemptArmed && <span className="discard-attempt-badge" aria-hidden="true">2×</span>}</button>;
         })}</div></article>)}
       </section>
       <section className="turn-controls">
@@ -391,18 +428,21 @@ export default function GamePage() {
           {(recentPeek || recentPowerPeek) && <button className="peek-confirm-timer" disabled={peekClosing} onClick={closePeek}>CONFIRM — I&apos;VE SEEN {recentPeek ? "THESE CARDS" : "THIS CARD"}</button>}
           {!recentPeek && game.canPeek && <button className="outline" onClick={() => sendAction({ type: "peek" })}>PEEK AT CARDS</button>}
           {game.isPeeking && <p>Everyone must peek at two cards before play begins.</p>}
-          {game.canUsePower && game.pendingPower?.rank === "8" && <><p>8 POWER: {powerSwapSelection ? "choose one more card to swap, or choose this card again to cancel." : "choose any two cards to swap face-down."}</p><button className="outline" onClick={() => { setPowerSwapSelection(undefined); void sendAction({ type: "skip-power" }); }}>DON&apos;T SWAP</button></>}
-          {game.canUsePower && (game.pendingPower?.rank === "J" || game.pendingPower?.rank === "Q") && <><p>{game.pendingPower.rank} POWER: click {game.pendingPower.rank === "J" ? "one of your own cards" : "one card at the table"} to peek at it.</p><button className="outline" onClick={() => void sendAction({ type: "skip-power" })}>SKIP PEEK</button></>}
+          {game.canUsePower && game.pendingPower?.rank === "8" && <p>8 POWER: {powerSwapSelection ? "choose one more card to swap, or choose this card again to cancel." : "choose any two cards to swap face-down."}</p>}
+          {game.canUsePower && (game.pendingPower?.rank === "J" || game.pendingPower?.rank === "Q") && <p>{game.pendingPower.rank} POWER: click {game.pendingPower.rank === "J" ? "one of your own cards" : "one card at the table"} to peek at it.</p>}
+          {game.canCompletePower && game.pendingPower && <>{!game.canUsePower && <p className="match-hint">POWER USED: MATCH THE DISCARD NOW, OR CONTINUE PLAY.</p>}<button className="outline" onClick={() => { setPowerSwapSelection(undefined); void sendAction({ type: "skip-power" }); }}>{game.canUsePower ? game.pendingPower.rank === "8" ? "DON'T SWAP" : "SKIP PEEK" : "CONTINUE PLAY"}</button></>}
           {game.canGiveMatchCard && game.pendingMatchGift && <p>MATCH CONFIRMED: {game.pendingMatchGift.targetPlayerName}&apos;s card is gone. Choose one of your cards to give them.</p>}
           {game.canAct && !game.heldCard && !game.pendingPower && <><button onClick={() => sendAction({ type: "draw-stock" })}>DRAW STOCK</button>{game.discard && <button onClick={() => sendAction({ type: "take-discard" })}>TAKE DISCARD</button>}<button className="outline" onClick={() => sendAction({ type: "knock" })}>{game.knockerName ? "PASS FINAL TURN" : "KNOCK"}</button></>}
-          {game.canAct && game.heldCard && <><div className="held-card"><span>DRAWN CARD</span><Card card={game.heldCard} /></div>{game.heldCardSource === "stock" && <button className="outline" onClick={() => sendAction({ type: "discard-drawn" })}>DISCARD DRAWN CARD</button>}<p>Choose one of your cards to replace.</p></>}
+          {game.canAct && game.heldCard && <><div className="held-card"><span>DRAWN CARD</span><Card card={game.heldCard} /></div>{game.heldCardSource === "stock" && <button className="outline" onClick={() => sendAction({ type: "discard-drawn" })}>DISCARD DRAWN CARD</button>}{canKeepDrawnCard && <button onClick={() => sendAction({ type: "keep-drawn" })}>KEEP DRAWN CARD</button>}<p>{canKeepDrawnCard ? "You have no cards left — discard this draw, or keep it in case it is a Joker." : "Choose one of your cards to replace."}</p></>}
           {game.canMatch && <p className="match-hint">{discardAttemptSelection ? "MATCH ARMED: SELECT THE HIGHLIGHTED CARD AGAIN TO CONFIRM." : "MATCH THE DISCARD: DOUBLE-CLICK OR DOUBLE-TAP A CARD TO TRY IT."}</p>}
         </>}
       </section>
+      <ChatPanel channel="room" inviteCode={view.room.inviteCode} playerId={playerProfile().id} playerName={playerProfile().name} className="game-chat-panel" />
       {error && <p className="game-error">{error}</p>}
     </>}
     {recentSwap?.travel.map((card, index) => <span aria-hidden="true" className="swap-travel-card" key={`${recentSwap.eventId}-${index}`} style={{ left: card.left, top: card.top, width: card.width, height: card.height, "--swap-x": `${card.x}px`, "--swap-y": `${card.y}px`, "--swap-midpoint-x": `${card.midpointX}px`, "--swap-midpoint-y": `${card.midpointY}px`, "--swap-tilt": `${card.tilt}deg` } as CSSProperties}>?</span>)}
     {game?.inactivityDeadline && <div className="leave-game-overlay inactivity-overlay" role="dialog" aria-modal="true" aria-labelledby="inactivity-title"><section><p>TABLE INACTIVE</p><h2 id="inactivity-title">STILL PLAYING?</h2><span>No moves have been made for a few minutes. Confirm to keep this table open.</span><strong>{inactivitySeconds}</strong><small>SECONDS REMAINING</small><button type="button" disabled={inactivitySeconds === 0} onClick={() => void sendAction({ type: "confirm-table-active" })}>KEEP TABLE OPEN</button></section></div>}
+    {game?.phase === "finished" && <div className="game-over-overlay" role="dialog" aria-modal="true" aria-labelledby="game-over-title"><section><p>NINE HOLES COMPLETE</p><h2 id="game-over-title">GAME OVER</h2><strong>{finalWinners.length > 1 ? `${finalWinners.map((player) => player.name).join(" & ")} TIE` : `${finalWinners[0]?.name || "A PLAYER"} WINS`}</strong><div className="final-scores">{[...game.players].sort((first, second) => second.totalScore - first.totalScore || first.name.localeCompare(second.name)).map((player) => <span className={player.totalScore === finalWinnerScore ? "winner" : ""} key={player.id}><b>{player.name}{player.isYou ? " (YOU)" : ""}</b><em>{player.totalScore}</em></span>)}</div><small>RETURNING TO THE LOBBY IN {gameOverSeconds}S</small><button type="button" onClick={() => void leaveTable()}>RETURN TO LOBBY</button></section></div>}
     {leaveConfirmation && <div className="leave-game-overlay" role="dialog" aria-modal="true" aria-labelledby="leave-game-title"><section><p>LEAVING MID-GAME</p><h2 id="leave-game-title">LEAVE THIS GAME?</h2><span>You will be removed from the table for every player.</span><div><button type="button" className="stay-button" onClick={() => setLeaveConfirmation(false)}>STAY</button><button type="button" className="leave-button" onClick={() => void leaveTable()}>LEAVE GAME</button></div></section></div>}
   </main>;
 }

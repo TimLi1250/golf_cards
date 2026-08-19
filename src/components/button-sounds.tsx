@@ -1,10 +1,10 @@
 "use client";
 
 import { useEffect, useRef } from "react";
+import { appAudioContext, closeAppAudioContext } from "../lib/browser-audio";
 
 /** A subtle UI click shared by the clubhouse, table lobby, and active game. */
 export default function ButtonSounds() {
-  const context = useRef<AudioContext | undefined>(undefined);
   const enabled = useRef(true);
 
   useEffect(() => {
@@ -15,8 +15,8 @@ export default function ButtonSounds() {
     const playClick = (event: MouseEvent) => {
       const target = event.target instanceof Element ? event.target.closest("button") : null;
       if (!target || target.disabled || target.dataset.audioControl === "true" || !enabled.current) return;
-      if (!context.current || context.current.state === "closed") context.current = new AudioContext();
-      const audio = context.current;
+      const audio = appAudioContext();
+      if (!audio) return;
       void audio.resume().then(() => {
         const oscillator = audio.createOscillator();
         const gain = audio.createGain();
@@ -36,7 +36,7 @@ export default function ButtonSounds() {
     return () => {
       window.removeEventListener("golf-sound-change", updatePreference);
       document.removeEventListener("click", playClick);
-      void context.current?.close();
+      closeAppAudioContext();
     };
   }, []);
 

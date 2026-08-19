@@ -7,6 +7,7 @@ import {
   createMatch,
   currentPlayer,
   discardDrawnStockCard,
+  keepDrawnCard,
   drawFromStock,
   eliminatePlayer,
   finalizeKnock,
@@ -93,6 +94,16 @@ test("stock card may be discarded without replacing a layout card", () => {
   assert.equal(currentPlayer(match).id, "player-3");
 });
 
+test("a player with no cards can keep a drawn stock card", () => {
+  const match = createMatch(players, { random: deterministicRandom });
+  completeInitialPeeks(match);
+  match.hole.layouts["player-2"] = [null, null, null, null];
+  const drawn = drawFromStock(match, "player-2");
+  keepDrawnCard(match, "player-2");
+  assert.equal(match.hole.layouts["player-2"][0]?.id, drawn.id);
+  assert.equal(currentPlayer(match).id, "player-3");
+});
+
 test("a discard draw must replace a card", () => {
   const match = createMatch(players, { random: deterministicRandom });
   completeInitialPeeks(match);
@@ -167,17 +178,67 @@ test("matching the discard removes a matching card and reports a wrong call for 
   assert.equal(match.hole.layouts["player-1"][0]?.rank, "6");
 });
 
-test("the last active player wins the hole and automatically starts the next one", () => {
+test("a match remains legal while the current player is holding a stock card", () => {
+  const match = createMatch(players, { random: deterministicRandom });
+  completeInitialPeeks(match);
+  match.hole.discard = [{ id: "5-discard", rank: "5", suit: "clubs" }];
+  match.hole.layouts["player-1"][0] = { id: "5-match", rank: "5", suit: "hearts" };
+
+  drawFromStock(match, "player-2");
+  assert.equal(matchDiscard(match, "player-1", 0).correct, true);
+  assert.equal(match.hole.layouts["player-1"][0], null);
+  assert.ok(match.hole.heldCard, "the current player's stock card remains in hand");
+});
+
+test("matched power cards wait their turn and resolve in order", () => {
+  const match = createMatch(players, { random: deterministicRandom });
+  completeInitialPeeks(match);
+  match.hole.layouts["player-2"][0] = { id: "8-original", rank: "8", suit: "clubs" };
+  match.hole.layouts["player-1"][0] = { id: "8-match", rank: "8", suit: "hearts" };
+  match.hole.heldCard = { card: { id: "replacement", rank: "3", suit: "hearts" }, source: "stock" };
+
+  replaceLayoutCard(match, "player-2", 0);
+  assert.equal(matchDiscard(match, "player-1", 0).correct, true);
+  assert.deepEqual(match.hole.pendingPowerQueue, [{ rank: "8", playerId: "player-1", endsTurn: false }]);
+
+  skipPower(match, "player-2");
+  assert.deepEqual(match.hole.pendingPower, { rank: "8", playerId: "player-1", endsTurn: false });
+  assert.equal(currentPlayer(match).id, "player-3", "the normal turn advances once before the matched power");
+
+  resolveSwapPower(match, "player-1");
+  assert.equal(match.hole.pendingPower, undefined);
+  assert.equal(currentPlayer(match).id, "player-3", "resolving a matched power does not consume another normal turn");
+});
+
+test("a Jack found with a Jack can be matched for another private peek", () => {
+  const match = createMatch(players, { random: deterministicRandom });
+  completeInitialPeeks(match);
+  match.hole.layouts["player-2"][0] = { id: "J-original", rank: "J", suit: "clubs" };
+  match.hole.layouts["player-2"][1] = { id: "J-match", rank: "J", suit: "hearts" };
+  match.hole.heldCard = { card: { id: "replacement", rank: "3", suit: "hearts" }, source: "stock" };
+
+  replaceLayoutCard(match, "player-2", 0);
+  assert.equal(resolvePeekPower(match, "player-2", { playerId: "player-2", layoutIndex: 1 }).rank, "J");
+  assert.equal(matchDiscard(match, "player-2", 1).correct, true);
+  skipPower(match, "player-2");
+
+  assert.deepEqual(match.hole.pendingPower, { rank: "J", playerId: "player-2", endsTurn: false });
+  assert.equal(resolvePeekPower(match, "player-2", { playerId: "player-2", layoutIndex: 2 }).id, match.hole.layouts["player-2"][2]?.id);
+});
+
+test("the last active player wins the hole and leaves all cards available for scoring", () => {
   const match = createMatch(players.slice(0, 3), { random: deterministicRandom });
   assert.equal(eliminatePlayer(match, "player-2").advanced, false);
   const result = eliminatePlayer(match, "player-3");
   assert.equal(result.winnerId, "player-1");
-  assert.equal(result.advanced, true);
+  assert.equal(result.advanced, false);
   assert.equal(match.status, "playing");
+  assert.equal(match.hole.number, 1);
+  assert.equal(match.hole.status, "scored");
+  assert.equal(match.players[0].totalScore, 1);
+  startNextHole(match);
   assert.equal(match.hole.number, 2);
   assert.deepEqual(match.eliminatedPlayerIds, undefined);
-  assert.equal(match.players[0].totalScore, 1);
-  assert.equal(currentPlayer(match).id, "player-3");
 });
 
 test("knock gives every other player one turn then opens a five-second matching window", () => {

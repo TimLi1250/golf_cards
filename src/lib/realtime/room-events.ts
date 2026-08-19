@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import type { ChatMessage } from "../chat";
 
 declare global {
   var fairwayFourRoomEvents: EventEmitter | undefined;
@@ -21,4 +22,12 @@ export function publishPresenceUpdate(inviteCode: string, playerIds: string[]): 
 
 export function publishDisconnectRequest(inviteCode: string, playerId: string, socketId?: string): void {
   roomEvents.emit("disconnect:begin", inviteCode.toUpperCase(), playerId, socketId);
+}
+
+export function publishLobbyChat(message: ChatMessage): void {
+  roomEvents.emit("chat:lobby", message);
+}
+
+export function publishRoomChat(inviteCode: string, message: ChatMessage): void {
+  roomEvents.emit("chat:room", inviteCode.toUpperCase(), message);
 }

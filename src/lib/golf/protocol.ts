@@ -52,6 +52,7 @@ export type GameView = {
       playerName: string;
     };
     canUsePower: boolean;
+    canCompletePower: boolean;
     canMatch: boolean;
     pendingMatchGift?: {
       playerId: string;
@@ -64,7 +65,7 @@ export type GameView = {
       id: string;
       message: string;
       playerId?: string;
-      type?: "start" | "peek" | "draw-stock" | "take-discard" | "replace" | "discard-drawn" | "knock" | "finalize-knock" | "next-hole" | "leave" | "power-swap" | "power-peek" | "skip-power" | "match-own" | "match-other";
+      type?: "start" | "peek" | "draw-stock" | "take-discard" | "replace" | "discard-drawn" | "keep-drawn" | "knock" | "finalize-knock" | "next-hole" | "leave" | "power-swap" | "power-peek" | "skip-power" | "match-own" | "match-other";
       layoutIndex?: number;
       affectedCards?: { playerId: string; layoutIndex: number }[];
     };
@@ -79,6 +80,7 @@ export type GameAction =
   | { type: "take-discard" }
   | { type: "replace"; layoutIndex: number }
   | { type: "discard-drawn" }
+  | { type: "keep-drawn" }
   | { type: "use-swap-power"; first?: { playerId: string; layoutIndex: number }; second?: { playerId: string; layoutIndex: number } }
   | { type: "use-peek-power"; targetPlayerId: string; layoutIndex: number }
   | { type: "skip-power" }

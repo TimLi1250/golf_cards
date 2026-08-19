@@ -3,6 +3,7 @@
 import { useRouter } from "next/navigation";
 import { FormEvent, useCallback, useEffect, useState } from "react";
 import { io } from "socket.io-client";
+import ChatPanel from "../components/chat-panel";
 import { copyText, playerProfile, savePlayerName } from "../lib/player-session";
 
 type Dialog = "host" | "join" | "rename" | null;
@@ -222,8 +223,10 @@ export default function Home() {
         <aside className="side-panel">
           <section className="players-list"><div className="panel-bar compact"><span>◉</span><h2>PLAYERS</h2></div>{orderedLobbyPlayers.map((player) => <div className="player-card" key={player.id}>{player.id === playerId ? <button className="avatar avatar-button" aria-label="Rename yourself" title="Rename yourself" onClick={() => openNameDialog("rename")}>{player.name.charAt(0).toUpperCase()}</button> : <div className="avatar">{player.name.charAt(0).toUpperCase()}</div>}<div><strong>{player.name}{player.id === playerId ? " (YOU)" : ""}</strong><small>{player.status === "game" ? "IN A GAME" : "IN THE CLUBHOUSE"}</small></div></div>)}{lobbyPlayers.length === 0 && <div className="empty-player"><span>+</span> CONNECTING PLAYERS…</div>}</section>
           <section className="game-notes"><div className="panel-bar compact"><span>?</span><h2>HOW TO PLAY</h2></div><p>Four cards. Nine holes. Lowest score wins.</p><a className="rules-link" href="/instructions">VIEW INSTRUCTIONS <b>→</b></a></section>
+          <ChatPanel channel="lobby" playerId={playerId} playerName={name} />
         </aside>
       </div>
+      <ChatPanel channel="lobby" playerId={playerId} playerName={name} className="mobile-lobby-chat" />
       {notice && <p className="toast" role="status">{notice}<button onClick={() => setNotice("")}>×</button></p>}
 
       {dialog === "host" && <div className="modal-backdrop" role="presentation"><form className="game-modal" onSubmit={hostGame}><button type="button" className="close" onClick={() => setDialog(null)}>×</button><p>NEW TABLE</p><h2>HOST A GAME</h2><label>YOUR NAME<input autoFocus value={draftName} maxLength={24} onChange={(event) => setDraftName(event.target.value)} placeholder="Guest" /></label><label>TABLE NAME<input value={gameName} maxLength={30} onChange={(event) => setGameName(event.target.value)} placeholder="Friday Scramble" /></label><label className="privacy-toggle">PRIVATE TABLE<input type="checkbox" checked={isPrivate} onChange={(event) => togglePrivateTable(event.target.checked)} /><span>{isPrivate ? "ON" : "OFF"}</span></label>{isPrivate && <div className="invite-preview"><span>INVITE CODE</span><b>{privateCode}</b><button type="button" onClick={() => void copyInviteCode()}>COPY</button></div>}<label>PLAYER LIMIT <output>{playerLimit}</output><input className="range" type="range" min="2" max="12" value={playerLimit} onChange={(event) => setPlayerLimit(Number(event.target.value))} /><small>{playerLimit > 6 ? "TWO DECKS WILL BE USED" : "ONE DECK WILL BE USED"}</small></label><button className="modal-submit" type="submit">CREATE TABLE →</button></form></div>}

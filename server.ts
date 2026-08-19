@@ -72,6 +72,7 @@ async function bootstrap() {
     socket.on("watch:room", (inviteCode: string) => {
       const normalizedInviteCode = inviteCode.toUpperCase();
       const room = `room:${normalizedInviteCode}`;
+      if (typeof socket.data.playerId !== "string" || !persistentRoomRegistry().isRoomPlayer(normalizedInviteCode, socket.data.playerId)) return;
       if (typeof socket.data.playerId === "string") cancelDisconnectRemoval(normalizedInviteCode, socket.data.playerId);
       // A player who navigates from the clubhouse into a table gets a new socket.
       // Keep that socket subscribed to lobby presence so other clubhouse visitors
@@ -95,6 +96,8 @@ async function bootstrap() {
   roomEvents.on("lobby:update", () => io.to("lobby").emit("lobby:update"));
   roomEvents.on("room:update", (inviteCode: string) => io.to(`room:${inviteCode}`).emit("room:update"));
   roomEvents.on("presence:update", (inviteCode: string, playerIds: string[]) => io.to(`room:${inviteCode}`).emit("presence:update", playerIds));
+  roomEvents.on("chat:lobby", (message) => io.to("lobby").emit("chat:message", { channel: "lobby", message }));
+  roomEvents.on("chat:room", (inviteCode: string, message) => io.to(`room:${inviteCode}`).emit("chat:message", { channel: "room", inviteCode, message }));
   roomEvents.on("disconnect:begin", (inviteCode: string, playerId: string, departingSocketId?: string) => {
     const room = `room:${inviteCode}`;
     const newerConnectionExists = [...io.sockets.sockets.values()].some((candidate) =>
