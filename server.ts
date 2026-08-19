@@ -73,6 +73,10 @@ async function bootstrap() {
       const normalizedInviteCode = inviteCode.toUpperCase();
       const room = `room:${normalizedInviteCode}`;
       if (typeof socket.data.playerId === "string") cancelDisconnectRemoval(normalizedInviteCode, socket.data.playerId);
+      // A player who navigates from the clubhouse into a table gets a new socket.
+      // Keep that socket subscribed to lobby presence so other clubhouse visitors
+      // continue to see them, now marked as being in a game.
+      socket.join("lobby");
       socket.join(room);
       broadcastPresence(io, room);
       broadcastLobbyPresence(io);
