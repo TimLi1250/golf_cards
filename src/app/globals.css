@@ -126,3 +126,8 @@
 
 .initial-peek-confirm:before { display:none; }.swap-card-badge { width:auto; min-width:32px; padding:3px 2px; font-size:6px; }.swap-identification { color:#ffe27a !important; line-height:1.65; }.lobby-credits { max-width:1380px; margin:18px auto 26px; padding:0 14px; color:#60786b; text-align:center; font:8px "Press Start 2P"; line-height:1.8; }
 @media (max-width:790px) { .lobby-credits { margin:16px 18px 28px; font-size:6px; } }
+
+/* Draw attention to the only available action when the clubhouse has no tables. */
+.empty-state .inline-create { animation:empty-create-flash 1.25s steps(2, end) infinite; }
+@keyframes empty-create-flash { 0%, 100% { opacity:1; box-shadow:5px 5px 0 var(--forest); } 50% { opacity:.32; box-shadow:0 0 0 var(--forest); } }
+@media (prefers-reduced-motion:reduce) { .empty-state .inline-create { animation:none; } }
