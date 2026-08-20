@@ -6,6 +6,7 @@ import { type CSSProperties, FormEvent, useCallback, useEffect, useRef, useState
 import { io } from "socket.io-client";
 import ChatPanel from "../../../components/chat-panel";
 import GameAudio from "../../../components/game-audio";
+import GameResultAudio from "../../../components/game-result-audio";
 import type { GameAction, GameView, PublicCard } from "../../../lib/golf/protocol";
 import { copyText, playerProfile, savePlayerName } from "../../../lib/player-session";
 
@@ -386,6 +387,7 @@ export default function GamePage() {
 
   const finalWinnerScore = game?.phase === "finished" ? Math.max(...game.players.map((player) => player.totalScore)) : 0;
   const finalWinners = game?.phase === "finished" ? game.players.filter((player) => player.totalScore === finalWinnerScore) : [];
+  const youWonGame = finalWinners.some((player) => player.isYou);
   const knockActive = Boolean(game?.knockerName && game.phase === "playing");
   const swapIdentification = game?.lastEvent?.type === "power-swap" && game.lastEvent.affectedCards?.length === 2
     ? game.lastEvent.affectedCards.map((affected) => {
@@ -395,6 +397,7 @@ export default function GamePage() {
     : undefined;
 
   return <main className="game-screen">
+    <GameResultAudio active={game?.phase === "finished"} won={youWonGame} />
     <header className="game-header"><Link href="/" className="back-link" onClick={(event) => { event.preventDefault(); if (game) setLeaveConfirmation(true); else void leaveTable(); }}>← LOBBY</Link><div><strong>{view.room.name}</strong><small className="game-invite-code">{view.room.inviteCode}</small></div><div className="game-header-actions"><GameAudio active={Boolean(view) && game?.phase !== "finished"} knock={knockActive} /><button className="copy-game-link" onClick={() => void copyGameLink()}>{linkCopied ? "LINK COPIED" : "COPY GAME LINK"}</button></div></header>
     {!game ? <section className="start-panel"><p>TABLE LOBBY</p><h1>{view.room.name}</h1><div className="waiting-players">{view.room.players.map((player) => <span key={player.id}>{player.name}</span>)}</div>{view.canStart ? <button onClick={() => sendAction({ type: "start" })}>START GAME →</button> : <p className="wait-copy">Waiting for {view.room.players[0]?.name} to start the game.</p>}{error && <p className="game-error">{error}</p>}</section> : <>
       <section className="table-status"><span>{game.phase === "finished" ? "GAME OVER" : game.isPeeking ? `PEEK PHASE ${game.peekedPlayers}/${game.activePlayerCount}` : game.phase === "scored" ? `${game.holeWinnerName || "A PLAYER"} WINS${game.tieBreakRounds ? ` AFTER ${game.tieBreakRounds} TIE-BREAK${game.tieBreakRounds > 1 ? "S" : ""}` : ""}` : game.finalMatchDeadline ? "FINAL MATCHING WINDOW" : game.currentPlayerName === "" ? "" : `${game.currentPlayerName}'S TURN`}</span><span>STOCK {game.stockCount}</span>{game.knockerName && <span>{game.knockerName} KNOCKED</span>}</section>
