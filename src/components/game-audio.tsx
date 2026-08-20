@@ -9,10 +9,12 @@ type GameAudioProps = {
 };
 
 const GAME_BGM_URL = "/game-bgm.mp3";
+const KNOCK_BGM_URL = "/knock-bgm.mp3";
 
 /** Plays the supplied BeepBox track locally, so it also works in the installed web app. */
 export default function GameAudio({ active, knock }: GameAudioProps) {
   const music = useRef<HTMLAudioElement | undefined>(undefined);
+  const playingKnockTrack = useRef(false);
   const enabledRef = useRef(true);
   const activeRef = useRef(active);
   const knockRef = useRef(knock);
@@ -20,11 +22,19 @@ export default function GameAudio({ active, knock }: GameAudioProps) {
   const [preferenceReady, setPreferenceReady] = useState(false);
 
   const getMusic = useCallback(() => {
+    const source = knockRef.current ? KNOCK_BGM_URL : GAME_BGM_URL;
     if (!music.current) {
-      music.current = new Audio(GAME_BGM_URL);
+      music.current = new Audio(source);
       music.current.loop = true;
       music.current.preload = "auto";
       music.current.volume = 0.34;
+      playingKnockTrack.current = knockRef.current;
+    } else if (playingKnockTrack.current !== knockRef.current) {
+      music.current.pause();
+      music.current.currentTime = 0;
+      music.current.src = source;
+      music.current.load();
+      playingKnockTrack.current = knockRef.current;
     }
     return music.current;
   }, []);
@@ -39,7 +49,7 @@ export default function GameAudio({ active, knock }: GameAudioProps) {
   const startMusic = useCallback(() => {
     if (!enabledRef.current || !activeRef.current) return;
     const track = getMusic();
-    track.playbackRate = knockRef.current ? 1.28 : 1;
+    track.playbackRate = 1;
     void track.play().catch(() => {
       // Mobile browsers require a game interaction before audio can begin.
     });
@@ -80,7 +90,6 @@ export default function GameAudio({ active, knock }: GameAudioProps) {
       stopMusic(true);
       return;
     }
-    if (music.current) music.current.playbackRate = knock ? 1.28 : 1;
     startMusic();
   }, [active, knock, startMusic, stopMusic]);
 
