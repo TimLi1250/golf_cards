@@ -13,6 +13,8 @@ import {
   finalizeKnock,
   matchDiscard,
   peekInitialCards,
+  previewOpponentDiscardMatch,
+  previewOwnDiscardMatch,
   replaceLayoutCard,
   removePlayer,
   skipPower,
@@ -22,8 +24,8 @@ import {
   resolveSwapPower,
   createMatch,
 } from "../golf/engine";
-import type { Card, LayoutCardReference, MatchEvent, MatchState } from "../golf/engine";
-import type { GameAction, GameView, PublicCard } from "../golf/protocol";
+import type { Card, LayoutCardReference, MatchAttemptSnapshot, MatchEvent, MatchState } from "../golf/engine";
+import type { GameAction, GameView, MatchAction, PublicCard } from "../golf/protocol";
 import type { ChatMessage } from "../chat";
 import { disconnectDeadline } from "../realtime/disconnect-state";
 import { PublicRoom, Room, RoomError, RoomPlayer } from "./registry";
@@ -423,6 +425,34 @@ export class SqliteRoomRegistry {
         players: viewPlayers,
       },
     };
+  }
+
+  previewMatchAttempt(inviteCode: string, roomPlayerId: string, action: MatchAction): MatchAttemptSnapshot & { playerName: string; targetPlayerId: string } {
+    const room = this.requireRoom(inviteCode);
+    if (room.status !== "playing") throw new RoomError("This game has not started.");
+    const players = this.playersFor(room.id);
+    const playerIndex = players.findIndex((player) => player.id === roomPlayerId);
+    if (playerIndex === -1) throw new RoomError("Join this game before taking an action.");
+    const storedGame = this.database.prepare("SELECT game_state FROM room_games WHERE room_id = ?").get(room.id) as unknown as { game_state: string } | undefined;
+    if (!storedGame) throw new RoomError("Game state could not be found.");
+    const match = JSON.parse(storedGame.game_state) as MatchState;
+    const enginePlayerId = `player-${playerIndex + 1}`;
+    const targetPlayerId = action.type === "match-own" ? roomPlayerId : action.targetPlayerId;
+    const targetIndex = players.findIndex((player) => player.id === targetPlayerId);
+    if (targetIndex === -1) throw new RoomError("Choose a player who is still at this table.");
+    const attempt = action.type === "match-own"
+      ? previewOwnDiscardMatch(match, enginePlayerId, action.layoutIndex)
+      : previewOpponentDiscardMatch(match, enginePlayerId, { playerId: `player-${targetIndex + 1}`, layoutIndex: action.layoutIndex });
+    return { ...attempt, playerName: players[playerIndex]?.name || "A player", targetPlayerId };
+  }
+
+  isMatchAttemptCurrent(inviteCode: string, roomPlayerId: string, action: MatchAction, expected: MatchAttemptSnapshot): boolean {
+    try {
+      const current = this.previewMatchAttempt(inviteCode, roomPlayerId, action);
+      return current.discardCardId === expected.discardCardId && current.targetCardId === expected.targetCardId;
+    } catch {
+      return false;
+    }
   }
 
   act(inviteCode: string, roomPlayerId: string, action: Exclude<GameAction, { type: "start" } | { type: "confirm-table-active" }>): { view: GameView; privatePeek?: PublicCard[]; privatePowerPeek?: { playerId: string; layoutIndex: number; card: PublicCard }; privateSelfReveal?: (PublicCard | null)[] } {

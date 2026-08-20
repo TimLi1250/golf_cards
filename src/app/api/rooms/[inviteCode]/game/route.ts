@@ -1,8 +1,10 @@
+import { randomUUID } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
-import type { GameAction } from "../../../../../lib/golf/protocol";
+import { OUT_GIF_DURATION_MS, SAFE_GIF_DURATION_MS, matchTravelDuration, waitForMatchTravel } from "../../../../../lib/golf/match-race";
+import type { GameAction, MatchAction } from "../../../../../lib/golf/protocol";
 import { RoomError } from "../../../../../lib/rooms/registry";
 import { persistentRoomRegistry } from "../../../../../lib/rooms/sqlite-registry";
-import { publishLobbyUpdate, publishRoomUpdate } from "../../../../../lib/realtime/room-events";
+import { publishLobbyUpdate, publishMatchResult, publishMatchTravel, publishRoomUpdate } from "../../../../../lib/realtime/room-events";
 
 export const dynamic = "force-dynamic";
 
@@ -27,17 +29,46 @@ export async function POST(request: NextRequest, context: RouteContext) {
     const body = await request.json() as { playerId?: string; action?: GameAction };
     if (!body.playerId || !body.action?.type) throw new RoomError("A player and game action are required.");
     const registry = persistentRoomRegistry();
-    const result = body.action.type === "start"
-      ? { view: registry.startGame(inviteCode, body.playerId) }
-      : body.action.type === "confirm-table-active"
-        ? { view: registry.confirmTableActive(inviteCode, body.playerId) }
-        : registry.act(inviteCode, body.playerId, body.action);
+    let result;
+    if (body.action.type === "start") {
+      result = { view: registry.startGame(inviteCode, body.playerId) };
+    } else if (body.action.type === "confirm-table-active") {
+      result = { view: registry.confirmTableActive(inviteCode, body.playerId) };
+    } else if (isMatchAction(body.action)) {
+      const attempt = registry.previewMatchAttempt(inviteCode, body.playerId, body.action);
+      const attemptId = randomUUID();
+      const durationMs = matchTravelDuration(attempt.correct);
+      publishMatchTravel(inviteCode, {
+        id: attemptId,
+        playerId: body.playerId,
+        targetPlayerId: attempt.targetPlayerId,
+        layoutIndex: body.action.layoutIndex,
+        durationMs,
+      });
+      await waitForMatchTravel(durationMs);
+      if (!registry.isMatchAttemptCurrent(inviteCode, body.playerId, body.action, attempt)) {
+        return NextResponse.json({ view: registry.gameView(inviteCode, body.playerId), matchAttemptCancelled: true });
+      }
+      result = registry.act(inviteCode, body.playerId, body.action);
+      publishMatchResult(inviteCode, {
+        id: attemptId,
+        playerName: attempt.playerName,
+        outcome: attempt.correct ? "safe" : "out",
+        durationMs: attempt.correct ? SAFE_GIF_DURATION_MS : OUT_GIF_DURATION_MS,
+      });
+    } else {
+      result = registry.act(inviteCode, body.playerId, body.action);
+    }
     publishRoomUpdate(inviteCode);
     publishLobbyUpdate();
     return NextResponse.json(result);
   } catch (error) {
     return gameErrorResponse(error, 400);
   }
+}
+
+function isMatchAction(action: GameAction): action is MatchAction {
+  return action.type === "match-own" || action.type === "claim-other-match";
 }
 
 function gameErrorResponse(error: unknown, status: number) {

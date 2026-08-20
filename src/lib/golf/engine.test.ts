@@ -15,6 +15,7 @@ import {
   knock,
   matchDiscard,
   peekInitialCards,
+  previewOwnDiscardMatch,
   resolvePeekPower,
   resolveSwapPower,
   replaceLayoutCard,
@@ -154,6 +155,11 @@ test("matching the discard removes a matching card and reports a wrong call for 
   completeInitialPeeks(match);
   match.hole.discard = [{ id: "5-discard", rank: "5", suit: "clubs" }];
   match.hole.layouts["player-1"][0] = { id: "5-own", rank: "5", suit: "hearts" };
+  assert.deepEqual(previewOwnDiscardMatch(match, "player-1", 0), {
+    correct: true,
+    discardCardId: "5-discard",
+    targetCardId: "5-own",
+  });
   assert.equal(matchDiscard(match, "player-1", 0).correct, true);
   assert.equal(match.hole.layouts["player-1"].length, 4);
   assert.equal(match.hole.layouts["player-1"][0], null);
@@ -188,6 +194,22 @@ test("a match remains legal while the current player is holding a stock card", (
   assert.equal(matchDiscard(match, "player-1", 0).correct, true);
   assert.equal(match.hole.layouts["player-1"][0], null);
   assert.ok(match.hole.heldCard, "the current player's stock card remains in hand");
+});
+
+test("a correct arrival changes the discard identity and expires a slower attempt", () => {
+  const match = createMatch(players, { random: deterministicRandom });
+  completeInitialPeeks(match);
+  match.hole.discard = [{ id: "5-discard", rank: "5", suit: "clubs" }];
+  match.hole.layouts["player-1"][0] = { id: "5-fast", rank: "5", suit: "hearts" };
+  match.hole.layouts["player-2"][0] = { id: "4-slow", rank: "4", suit: "diamonds" };
+
+  const slowerAttempt = previewOwnDiscardMatch(match, "player-2", 0);
+  matchDiscard(match, "player-1", 0);
+  const currentAttempt = previewOwnDiscardMatch(match, "player-2", 0);
+
+  assert.equal(slowerAttempt.correct, false);
+  assert.equal(currentAttempt.correct, false);
+  assert.notEqual(currentAttempt.discardCardId, slowerAttempt.discardCardId);
 });
 
 test("matched power cards wait their turn and resolve in order", () => {

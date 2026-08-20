@@ -120,7 +120,15 @@ test("eliminates a player who calls a wrong match while the other players contin
     database.prepare("UPDATE room_games SET game_state = ? WHERE room_id = ?").run(JSON.stringify(match), room.id);
     database.close();
 
-    const wrongGuess = registry.act(room.inviteCode, "player-b", { type: "match-own", layoutIndex: 0 });
+    const action = { type: "match-own" as const, layoutIndex: 0 };
+    const attempt = registry.previewMatchAttempt(room.inviteCode, "player-b", action);
+    assert.equal(attempt.correct, false);
+    assert.equal(attempt.discardCardId, "discard-5");
+    assert.equal(attempt.targetCardId, "wrong-4");
+    assert.equal(registry.isMatchAttemptCurrent(room.inviteCode, "player-b", action, attempt), true);
+
+    const wrongGuess = registry.act(room.inviteCode, "player-b", action);
+    assert.equal(registry.isMatchAttemptCurrent(room.inviteCode, "player-b", action, attempt), false);
     assert.equal(wrongGuess.privateSelfReveal?.length, 4);
     assert.equal(wrongGuess.privateSelfReveal?.[0]?.rank, "4");
     assert.deepEqual(wrongGuess.view.game?.players.find((player) => player.name === "Blake")?.cards, [null, null, null, null]);

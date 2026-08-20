@@ -38,6 +38,12 @@ export type LayoutCardReference = {
   layoutIndex: number;
 };
 
+export type MatchAttemptSnapshot = {
+  correct: boolean;
+  discardCardId: string;
+  targetCardId: string;
+};
+
 export type HoleState = {
   number: number;
   dealerIndex: number;
@@ -285,20 +291,8 @@ export function skipPower(match: MatchState, playerId: string): void {
  * makes a wrong call, allowing the remaining players to continue.
  */
 export function matchDiscard(match: MatchState, playerId: string, layoutIndex: number): { correct: boolean; discarded?: Card } {
-  assertPlaying(match);
-  assertInitialPeekComplete(match);
-  assertActivePlayer(match, playerId);
-  assertMatchingAvailable(match);
-  const target = { playerId, layoutIndex };
-  assertLayoutReference(match, target);
-
-  const topDiscard = match.hole.discard.at(-1);
-  if (!topDiscard) throw new GolfRuleError("The discard pile is empty.");
-  const claimedCard = match.hole.layouts[target.playerId][target.layoutIndex];
-  if (!claimedCard) throw new GolfRuleError("Choose a card that is still on the table.");
-  if (claimedCard.rank !== topDiscard.rank) {
-    return { correct: false };
-  }
+  const attempt = previewOwnDiscardMatch(match, playerId, layoutIndex);
+  if (!attempt.correct) return { correct: false };
 
   const matched = match.hole.layouts[playerId][layoutIndex];
   if (!matched) throw new GolfRuleError("Choose a card that is still on the table.");
@@ -310,24 +304,44 @@ export function matchDiscard(match: MatchState, playerId: string, layoutIndex: n
 
 /** Claims an opponent's matching card. A correct claim must be followed by a gift. */
 export function claimOpponentMatch(match: MatchState, playerId: string, target: LayoutCardReference): { correct: boolean } {
-  assertPlaying(match);
-  assertInitialPeekComplete(match);
-  assertActivePlayer(match, playerId);
-  assertMatchingAvailable(match);
-  assertLayoutReference(match, target);
-  if (target.playerId === playerId) throw new GolfRuleError("Choose another player's card for an opponent match.");
-  if (isEliminated(match, target.playerId)) throw new GolfRuleError("That player is already out of this hole.");
-  const topDiscard = match.hole.discard.at(-1);
-  if (!topDiscard) throw new GolfRuleError("The discard pile is empty.");
-  const claimedCard = match.hole.layouts[target.playerId][target.layoutIndex];
-  if (!claimedCard) throw new GolfRuleError("Choose a card that is still on the table.");
-  if (claimedCard.rank !== topDiscard.rank) return { correct: false };
+  const attempt = previewOpponentDiscardMatch(match, playerId, target);
+  if (!attempt.correct) return { correct: false };
 
   const matchedCard = match.hole.layouts[target.playerId][target.layoutIndex];
   if (!matchedCard) throw new GolfRuleError("Choose a card that is still on the table.");
   match.hole.layouts[target.playerId][target.layoutIndex] = null;
   match.hole.pendingMatchGift = { playerId, targetPlayerId: target.playerId, targetLayoutIndex: target.layoutIndex, matchedCard };
   return { correct: true };
+}
+
+/** Validates an own-card match without changing the table. */
+export function previewOwnDiscardMatch(match: MatchState, playerId: string, layoutIndex: number): MatchAttemptSnapshot {
+  return previewDiscardMatch(match, playerId, { playerId, layoutIndex });
+}
+
+/** Validates an opponent-card match without changing the table. */
+export function previewOpponentDiscardMatch(match: MatchState, playerId: string, target: LayoutCardReference): MatchAttemptSnapshot {
+  const attempt = previewDiscardMatch(match, playerId, target);
+  if (target.playerId === playerId) throw new GolfRuleError("Choose another player's card for an opponent match.");
+  if (isEliminated(match, target.playerId)) throw new GolfRuleError("That player is already out of this hole.");
+  return attempt;
+}
+
+function previewDiscardMatch(match: MatchState, playerId: string, target: LayoutCardReference): MatchAttemptSnapshot {
+  assertPlaying(match);
+  assertInitialPeekComplete(match);
+  assertActivePlayer(match, playerId);
+  assertMatchingAvailable(match);
+  assertLayoutReference(match, target);
+  const topDiscard = match.hole.discard.at(-1);
+  if (!topDiscard) throw new GolfRuleError("The discard pile is empty.");
+  const claimedCard = match.hole.layouts[target.playerId][target.layoutIndex];
+  if (!claimedCard) throw new GolfRuleError("Choose a card that is still on the table.");
+  return {
+    correct: claimedCard.rank === topDiscard.rank,
+    discardCardId: topDiscard.id,
+    targetCardId: claimedCard.id,
+  };
 }
 
 /** Completes a correct opponent match by placing one of the caller's cards into the empty position. */

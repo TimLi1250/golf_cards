@@ -1,6 +1,21 @@
 import { EventEmitter } from "node:events";
 import type { ChatMessage } from "../chat";
 
+export type MatchTravelEvent = {
+  id: string;
+  playerId: string;
+  targetPlayerId: string;
+  layoutIndex: number;
+  durationMs: number;
+};
+
+export type MatchResultEvent = {
+  id: string;
+  playerName: string;
+  outcome: "safe" | "out";
+  durationMs: number;
+};
+
 declare global {
   var fairwayFourRoomEvents: EventEmitter | undefined;
 }
@@ -14,6 +29,14 @@ export function publishLobbyUpdate(): void {
 
 export function publishRoomUpdate(inviteCode: string): void {
   roomEvents.emit("room:update", inviteCode);
+}
+
+export function publishMatchTravel(inviteCode: string, event: MatchTravelEvent): void {
+  roomEvents.emit("match:travel", inviteCode.toUpperCase(), event);
+}
+
+export function publishMatchResult(inviteCode: string, event: MatchResultEvent): void {
+  roomEvents.emit("match:result", inviteCode.toUpperCase(), event);
 }
 
 export function publishPresenceUpdate(inviteCode: string, playerIds: string[]): void {

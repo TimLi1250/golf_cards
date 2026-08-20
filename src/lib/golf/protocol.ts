@@ -91,3 +91,5 @@ export type GameAction =
   | { type: "finalize-knock" }
   | { type: "confirm-table-active" }
   | { type: "next-hole" };
+
+export type MatchAction = Extract<GameAction, { type: "match-own" | "claim-other-match" }>;
