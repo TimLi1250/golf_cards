@@ -98,34 +98,19 @@ async function bootstrap() {
   roomEvents.on("presence:update", (inviteCode: string, playerIds: string[]) => io.to(`room:${inviteCode}`).emit("presence:update", playerIds));
   roomEvents.on("chat:lobby", (message) => io.to("lobby").emit("chat:message", { channel: "lobby", message }));
   roomEvents.on("chat:room", (inviteCode: string, message) => io.to(`room:${inviteCode}`).emit("chat:message", { channel: "room", inviteCode, message }));
-  roomEvents.on("disconnect:begin", (inviteCode: string, playerId: string, departingSocketId?: string) => {
-    const room = `room:${inviteCode}`;
-    const newerConnectionExists = [...io.sockets.sockets.values()].some((candidate) =>
-      candidate.rooms.has(room) && candidate.data.playerId === playerId && candidate.id !== departingSocketId,
-    );
-    if (newerConnectionExists) return;
-    scheduleDisconnectRemoval(room, playerId, departingSocketId, true);
-    broadcastPresence(io, room, departingSocketId);
-  });
-
   const emptyTableSweep = setInterval(() => {
     const registry = persistentRoomRegistry();
-    const removedInviteCodes = registry.inviteCodes().filter((inviteCode) => !io.sockets.adapter.rooms.get(`room:${inviteCode}`)?.size)
+    // WebSocket connections can briefly disappear while a mobile app is
+    // backgrounded or reconnecting. Only remove tables after the persistent
+    // player list is genuinely empty, never merely because a socket is gone.
+    const removedInviteCodes = registry.inviteCodes()
+      .filter((inviteCode) => registry.get(inviteCode).players.length === 0)
       .filter((inviteCode) => registry.removeRoom(inviteCode));
     if (removedInviteCodes.length === 0) return;
     publishLobbyUpdate();
     for (const inviteCode of removedInviteCodes) publishRoomUpdate(inviteCode);
   }, 60_000);
   emptyTableSweep.unref();
-
-  const inactiveTableSweep = setInterval(() => {
-    const { warnedInviteCodes, removedInviteCodes } = persistentRoomRegistry().sweepInactiveTables();
-    for (const inviteCode of warnedInviteCodes) publishRoomUpdate(inviteCode);
-    if (removedInviteCodes.length === 0) return;
-    publishLobbyUpdate();
-    for (const inviteCode of removedInviteCodes) publishRoomUpdate(inviteCode);
-  }, 1_000);
-  inactiveTableSweep.unref();
 
   httpServer.listen(port, () => {
     console.log(`> Ready on http://localhost:${port}`);

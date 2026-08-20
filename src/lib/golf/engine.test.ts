@@ -193,6 +193,8 @@ test("a match remains legal while the current player is holding a stock card", (
 test("matched power cards wait their turn and resolve in order", () => {
   const match = createMatch(players, { random: deterministicRandom });
   completeInitialPeeks(match);
+  const first = match.hole.layouts["player-1"][1]!;
+  const second = match.hole.layouts["player-3"][1]!;
   match.hole.layouts["player-2"][0] = { id: "8-original", rank: "8", suit: "clubs" };
   match.hole.layouts["player-1"][0] = { id: "8-match", rank: "8", suit: "hearts" };
   match.hole.heldCard = { card: { id: "replacement", rank: "3", suit: "hearts" }, source: "stock" };
@@ -201,7 +203,9 @@ test("matched power cards wait their turn and resolve in order", () => {
   assert.equal(matchDiscard(match, "player-1", 0).correct, true);
   assert.deepEqual(match.hole.pendingPowerQueue, [{ rank: "8", playerId: "player-1", endsTurn: false }]);
 
-  skipPower(match, "player-2");
+  resolveSwapPower(match, "player-2", { playerId: "player-1", layoutIndex: 1 }, { playerId: "player-3", layoutIndex: 1 });
+  assert.equal(match.hole.layouts["player-1"][1], second, "the original eight resolves first");
+  assert.equal(match.hole.layouts["player-3"][1], first);
   assert.deepEqual(match.hole.pendingPower, { rank: "8", playerId: "player-1", endsTurn: false });
   assert.equal(currentPlayer(match).id, "player-3", "the normal turn advances once before the matched power");
 

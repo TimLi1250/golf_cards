@@ -182,14 +182,7 @@ export default function GamePage() {
       setConnectedPlayerIds(new Set(update.playerIds));
       setDisconnectDeadlines(update.disconnectDeadlines);
     });
-    const beginDisconnectGracePeriod = () => {
-      const body = JSON.stringify({ playerId: playerProfile().id, socketId: socket.id });
-      const blob = new Blob([body], { type: "application/json" });
-      navigator.sendBeacon(`/api/rooms/${inviteCode}/disconnect`, blob);
-    };
-    window.addEventListener("pagehide", beginDisconnectGracePeriod);
     return () => {
-      window.removeEventListener("pagehide", beginDisconnectGracePeriod);
       socket.disconnect();
     };
   }, [hasJoinedTable, inviteCode, refreshGame]);
@@ -251,10 +244,12 @@ export default function GamePage() {
   }, [leaveTable, view?.game?.phase]);
 
   useEffect(() => {
-    if (!recentPeek && !recentPowerPeek) return;
+    // Initial peeks remain visible until the player explicitly confirms them.
+    // A power peek still closes automatically because play is already underway.
+    if (!recentPowerPeek) return;
     const timer = window.setTimeout(closePeek, 5_000);
     return () => window.clearTimeout(timer);
-  }, [closePeek, recentPeek, recentPowerPeek]);
+  }, [closePeek, recentPowerPeek]);
 
   useEffect(() => () => {
     if (peekCloseTimer.current) window.clearTimeout(peekCloseTimer.current);
@@ -392,6 +387,12 @@ export default function GamePage() {
   const finalWinnerScore = game?.phase === "finished" ? Math.max(...game.players.map((player) => player.totalScore)) : 0;
   const finalWinners = game?.phase === "finished" ? game.players.filter((player) => player.totalScore === finalWinnerScore) : [];
   const knockActive = Boolean(game?.knockerName && game.phase === "playing");
+  const swapIdentification = game?.lastEvent?.type === "power-swap" && game.lastEvent.affectedCards?.length === 2
+    ? game.lastEvent.affectedCards.map((affected) => {
+      const player = game.players.find((candidate) => candidate.id === affected.playerId);
+      return `${player?.name || "PLAYER"} • CARD ${affected.layoutIndex + 1}`;
+    }).join(" <-> ")
+    : undefined;
 
   return <main className="game-screen">
     <header className="game-header"><Link href="/" className="back-link" onClick={(event) => { event.preventDefault(); if (game) setLeaveConfirmation(true); else void leaveTable(); }}>← LOBBY</Link><div><strong>{view.room.name}</strong><small className="game-invite-code">{view.room.inviteCode}</small></div><div className="game-header-actions"><GameAudio active={Boolean(view) && game?.phase !== "finished"} knock={knockActive} /><button className="copy-game-link" onClick={() => void copyGameLink()}>{linkCopied ? "LINK COPIED" : "COPY GAME LINK"}</button></div></header>
@@ -402,7 +403,7 @@ export default function GamePage() {
       <section className={`digital-table circular-table ${knockActive ? "knock-active" : ""} ${seatedPlayers.length > 8 ? "seating-dense" : seatedPlayers.length > 5 ? "seating-compact" : ""}`} aria-label={knockActive ? `${game.knockerName} called knock` : "Game table"}>
         <div className="center-table">
           <div className="center-piles"><div><p>STOCK</p><button type="button" aria-label="Draw from stock" disabled={!canDrawFromStock} onClick={() => void sendAction({ type: "draw-stock" })} key={game.lastEvent?.type === "draw-stock" ? game.lastEvent.id : "stock"} className={`center-pile-button stock-card ${game.lastEvent?.type === "draw-stock" ? "action-card-highlight" : ""}`}>?</button></div><div><p>DISCARD</p>{game.discard && <button type="button" aria-label={game.heldCardSource === "stock" ? "Discard drawn card" : "Take discard"} disabled={!canUseDiscardPile} onClick={() => void sendAction(game.heldCardSource === "stock" && game.heldCard ? { type: "discard-drawn" } : { type: "take-discard" })} className={`center-pile-button ${["take-discard", "replace", "discard-drawn"].includes(game.lastEvent?.type || "") ? "action-card-highlight" : ""}`} key={["take-discard", "replace", "discard-drawn"].includes(game.lastEvent?.type || "") ? game.lastEvent?.id : "discard"}><Card card={game.discard} /></button>}</div></div>
-          {game.finalMatchDeadline ? <div className="table-activity final-match-call"><strong>FINAL CALL TO MATCH THE DISCARD - {finalSeconds}S</strong></div> : <div className="table-activity" key={game.lastEvent?.id || "opening-play"}><span>TABLE FEED</span><strong>{game.lastEvent?.message || "Cards are on the table."}</strong><small>{game.currentPlayerName ? `${game.currentPlayerName.toUpperCase()} IS UP` : "WAITING FOR THE NEXT PLAY"}</small></div>}
+          {game.finalMatchDeadline ? <div className="table-activity final-match-call"><strong>FINAL CALL TO MATCH THE DISCARD - {finalSeconds}S</strong></div> : <div className="table-activity" key={game.lastEvent?.id || "opening-play"}><span>TABLE FEED</span><strong>{game.lastEvent?.message || "Cards are on the table."}</strong>{swapIdentification && <small className="swap-identification">SWAPPED: {swapIdentification}</small>}<small>{game.currentPlayerName ? `${game.currentPlayerName.toUpperCase()} IS UP` : "WAITING FOR THE NEXT PLAY"}</small></div>}
         </div>
         {seatedPlayers.map((player, index) => <article className={`table-player table-seat ${player.isYou ? "is-you" : ""} ${player.isOut ? "is-out" : ""} ${player.isYou && privateSelfReveal ? "self-revealed" : ""} ${game.lastEvent?.playerId === player.id && ["peek", "knock"].includes(game.lastEvent.type || "") ? "action-player-highlight" : ""}`} style={seatPosition(index, seatedPlayers.length, isMobileTable)} key={player.id}><header><span><i className={`presence-dot ${connectedPlayerIds.has(player.id) ? "online" : ""}`} />{player.name}{player.isYou ? " (YOU)" : ""}</span>{player.isOut ? <b>OUT</b> : player.score !== undefined && <b>{player.score} PTS</b>}</header>{disconnectDeadlines[player.id] && <small className="disconnect-countdown">DISCONNECTED… REMOVING IN {Math.max(0, Math.ceil((disconnectDeadlines[player.id] - presenceNow) / 1_000))}S</small>}<div className="layout-cards">{player.cards.map((card, cardIndex) => {
           const replacement = game.lastEvent?.type === "replace" && game.lastEvent.playerId === player.id && game.lastEvent.layoutIndex === cardIndex;
@@ -420,12 +421,12 @@ export default function GamePage() {
           const canSelect = !player.isOut && game.phase === "playing" && (game.canUsePower || (game.canGiveMatchCard && player.isYou) || (player.isYou && game.canAct && game.heldCard) || game.canMatch);
           const cardSelection = { playerId: player.id, layoutIndex: cardIndex };
           const swapMarked = recentSwap?.cards.some((affected) => affected.playerId === player.id && affected.layoutIndex === cardIndex);
-          return <button ref={(element) => { const key = cardSlotKey(cardSelection); if (element) swapCardElements.current.set(key, element); else swapCardElements.current.delete(key); }} key={cardIndex} disabled={!canSelect || !player.occupiedSlots[cardIndex]} onClick={() => handleCardClick(player.id, player.isYou, player.isOut, cardIndex)} className={`layout-card ${highlighted ? "action-card-highlight" : ""} ${replacementCard ? "placed-card" : ""} ${publicReplacementCard ? "public-replacement-flip" : ""} ${peekCard || powerPeekCard ? `peeked-card ${peekClosing ? "peek-closing" : ""}` : ""} ${selectedForSwap ? "selected-table-card" : ""} ${swapMarked ? "swap-marked-card" : ""} ${discardAttemptArmed ? "discard-attempt-armed" : ""}`}><Card card={displayedCard} empty={empty} />{swapMarked && <span className="swap-card-badge" aria-label="Recently swapped">↔</span>}{discardAttemptArmed && <span className="discard-attempt-badge" aria-hidden="true">2×</span>}</button>;
+          return <button ref={(element) => { const key = cardSlotKey(cardSelection); if (element) swapCardElements.current.set(key, element); else swapCardElements.current.delete(key); }} key={cardIndex} disabled={!canSelect || !player.occupiedSlots[cardIndex]} onClick={() => handleCardClick(player.id, player.isYou, player.isOut, cardIndex)} className={`layout-card ${highlighted ? "action-card-highlight" : ""} ${replacementCard ? "placed-card" : ""} ${publicReplacementCard ? "public-replacement-flip" : ""} ${peekCard || powerPeekCard ? `peeked-card ${peekClosing ? "peek-closing" : ""}` : ""} ${selectedForSwap ? "selected-table-card" : ""} ${swapMarked ? "swap-marked-card" : ""} ${discardAttemptArmed ? "discard-attempt-armed" : ""}`}><Card card={displayedCard} empty={empty} />{swapMarked && <span className="swap-card-badge" aria-label="Recently swapped">{"<->"}</span>}{discardAttemptArmed && <span className="discard-attempt-badge" aria-hidden="true">2×</span>}</button>;
         })}</div></article>)}
       </section>
       <section className="turn-controls">
         {game.phase === "scored" ? <button onClick={() => sendAction({ type: "next-hole" })}>NEXT HOLE →</button> : <>
-          {(recentPeek || recentPowerPeek) && <button className="peek-confirm-timer" disabled={peekClosing} onClick={closePeek}>CONFIRM — I&apos;VE SEEN {recentPeek ? "THESE CARDS" : "THIS CARD"}</button>}
+          {(recentPeek || recentPowerPeek) && <button className={`peek-confirm-timer ${recentPeek ? "initial-peek-confirm" : ""}`} disabled={peekClosing} onClick={closePeek}>CONFIRM — I&apos;VE SEEN {recentPeek ? "THESE CARDS" : "THIS CARD"}</button>}
           {!recentPeek && game.canPeek && <button className="outline" onClick={() => sendAction({ type: "peek" })}>PEEK AT CARDS</button>}
           {game.isPeeking && <p>Everyone must peek at two cards before play begins.</p>}
           {game.canUsePower && game.pendingPower?.rank === "8" && <p>8 POWER: {powerSwapSelection ? "choose one more card to swap, or choose this card again to cancel." : "choose any two cards to swap face-down."}</p>}

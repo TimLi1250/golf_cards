@@ -20,10 +20,6 @@ export function publishPresenceUpdate(inviteCode: string, playerIds: string[]): 
   roomEvents.emit("presence:update", inviteCode, playerIds);
 }
 
-export function publishDisconnectRequest(inviteCode: string, playerId: string, socketId?: string): void {
-  roomEvents.emit("disconnect:begin", inviteCode.toUpperCase(), playerId, socketId);
-}
-
 export function publishLobbyChat(message: ChatMessage): void {
   roomEvents.emit("chat:lobby", message);
 }
