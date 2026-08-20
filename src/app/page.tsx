@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import { FormEvent, useCallback, useEffect, useState } from "react";
 import { io } from "socket.io-client";
 import ChatPanel from "../components/chat-panel";
+import ClubhouseAudio from "../components/clubhouse-audio";
 import { copyText, playerProfile, savePlayerName } from "../lib/player-session";
 
 type Dialog = "host" | "join" | "rename" | null;
@@ -193,7 +194,7 @@ export default function Home() {
       <header className="topbar header-cardbar">
         <a className="pixel-logo" href="#"><span className="golf-ball-mark" aria-hidden="true" />GOLF</a>
         <span className="header-tagline">FOUR CARD • ONLINE TABLES</span>
-        <div className="top-actions"><button className="join-code-button" onClick={() => openJoinDialog()}>JOIN CODE</button></div>
+        <div className="top-actions"><ClubhouseAudio /><button className="join-code-button" onClick={() => openJoinDialog()}>JOIN CODE</button></div>
       </header>
 
       <div className="app-grid">
