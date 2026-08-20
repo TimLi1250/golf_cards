@@ -1,5 +1,5 @@
-const CACHE_NAME = "golf-app-shell-v1";
-const APP_SHELL = ["/", "/manifest.webmanifest", "/icon"];
+const CACHE_NAME = "golf-app-shell-v2";
+const APP_SHELL = ["/", "/manifest.webmanifest", "/icon", "/game-bgm.mp3"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(APP_SHELL)));
