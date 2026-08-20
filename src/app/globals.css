@@ -128,6 +128,6 @@
 @media (max-width:790px) { .lobby-credits { margin:16px 18px 28px; font-size:6px; } }
 
 /* Draw attention to the only available action when the clubhouse has no tables. */
-.empty-state .inline-create { animation:empty-create-flash 1.25s steps(2, end) infinite; }
-@keyframes empty-create-flash { 0%, 100% { opacity:1; box-shadow:5px 5px 0 var(--forest); } 50% { opacity:.32; box-shadow:0 0 0 var(--forest); } }
+.empty-state .inline-create { animation:empty-create-blink 20s step-end infinite; }
+@keyframes empty-create-blink { 0%, 4% { background:var(--lime); color:var(--forest-2); box-shadow:5px 5px 0 var(--coral); } 4.1%, 100% { background:var(--coral); color:#fffdf7; box-shadow:5px 5px 0 var(--forest); } }
 @media (prefers-reduced-motion:reduce) { .empty-state .inline-create { animation:none; } }
