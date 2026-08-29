@@ -57,21 +57,25 @@ test("stores an authoritative game while keeping layout card faces private", () 
     const room = registry.create({ host: "Avery", hostId: "player-a", name: "Night nine", playerLimit: 2 });
     registry.join(room.inviteCode, { playerId: "player-b", playerName: "Blake" });
     const started = registry.startGame(room.inviteCode, "player-a");
+    assert.equal(started.game?.revision, 1);
     assert.equal(started.game?.phase, "playing");
     assert.equal(started.game?.discard, null);
     assert.equal(started.game?.canMatch, false);
     assert.deepEqual(started.game?.players[0].cards, [null, null, null, null]);
 
     const peek = registry.act(room.inviteCode, "player-a", { type: "peek" });
+    assert.equal(peek.view.game?.revision, 2);
     assert.equal(peek.privatePeek?.length, 2);
     assert.deepEqual(peek.view!.game?.players[0].cards, [null, null, null, null]);
 
     const ready = registry.act(room.inviteCode, "player-b", { type: "peek" });
+    assert.equal(ready.view.game?.revision, 3);
     assert.equal(ready.view.game?.canAct, true);
     assert.equal(ready.view.game?.discard, null);
     assert.equal(ready.view.game?.canMatch, false);
 
     const drawn = registry.act(room.inviteCode, "player-b", { type: "draw-stock" });
+    assert.equal(drawn.view.game?.revision, 4);
     assert.ok(drawn.view!.game?.heldCard);
     let afterReplacement = registry.act(room.inviteCode, "player-b", { type: "replace", layoutIndex: 0 });
     if (afterReplacement.view.game?.canUsePower) afterReplacement = registry.act(room.inviteCode, "player-b", { type: "skip-power" });
@@ -89,10 +93,11 @@ test("removes a departing player from an active game for every remaining player"
     const room = registry.create({ host: "Avery", hostId: "player-a", playerLimit: 3 });
     registry.join(room.inviteCode, { playerId: "player-b", playerName: "Blake" });
     registry.join(room.inviteCode, { playerId: "player-c", playerName: "Casey" });
-    registry.startGame(room.inviteCode, "player-a");
+    assert.equal(registry.startGame(room.inviteCode, "player-a").game?.revision, 1);
 
     assert.deepEqual(registry.leave(room.inviteCode, "player-b"), { left: true, finished: false });
     const remainingView = registry.gameView(room.inviteCode, "player-a");
+    assert.equal(remainingView.game?.revision, 2);
     assert.deepEqual(remainingView.room.players.map((player) => player.name), ["Avery", "Casey"]);
     assert.deepEqual(remainingView.game?.players.map((player) => player.name), ["Avery", "Casey"]);
   } finally {
@@ -186,16 +191,19 @@ test("warns only the host before removing an inactive table", () => {
   try {
     const room = registry.create({ host: "Avery", hostId: "player-a", playerLimit: 2 });
     registry.join(room.inviteCode, { playerId: "player-b", playerName: "Blake" });
-    registry.startGame(room.inviteCode, "player-a");
+    assert.equal(registry.startGame(room.inviteCode, "player-a").game?.revision, 1);
     const now = Date.now();
     const database = new DatabaseSync(databasePath);
     database.prepare("UPDATE room_games SET last_activity_at = ? WHERE room_id = ?").run(now - 180_001, room.id);
 
     assert.deepEqual(registry.sweepInactiveTables(now), { warnedInviteCodes: [room.inviteCode], removedInviteCodes: [] });
+    assert.equal(registry.gameView(room.inviteCode, "player-a").game?.revision, 2);
     assert.equal(registry.gameView(room.inviteCode, "player-a").game?.inactivityDeadline, now + 30_000);
     assert.equal(registry.gameView(room.inviteCode, "player-b").game?.inactivityDeadline, undefined);
     assert.throws(() => registry.confirmTableActive(room.inviteCode, "player-b", now + 1_000));
-    assert.equal(registry.confirmTableActive(room.inviteCode, "player-a", now + 1_000).game?.inactivityDeadline, undefined);
+    const confirmed = registry.confirmTableActive(room.inviteCode, "player-a", now + 1_000);
+    assert.equal(confirmed.game?.inactivityDeadline, undefined);
+    assert.equal(confirmed.game?.revision, 3);
 
     database.prepare("UPDATE room_games SET last_activity_at = ? WHERE room_id = ?").run(now - 180_001, room.id);
     registry.sweepInactiveTables(now);
@@ -254,11 +262,16 @@ test("migrates existing room databases with private-table support", () => {
   const databasePath = join(directory, "rooms.sqlite");
   const oldDatabase = new DatabaseSync(databasePath);
   oldDatabase.exec("CREATE TABLE rooms (id TEXT PRIMARY KEY, invite_code TEXT NOT NULL UNIQUE, name TEXT NOT NULL, host TEXT NOT NULL, player_limit INTEGER NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL) STRICT;");
+  oldDatabase.exec("CREATE TABLE room_games (room_id TEXT PRIMARY KEY, game_state TEXT NOT NULL) STRICT;");
   oldDatabase.close();
   const registry = new SqliteRoomRegistry(databasePath);
   try {
     const room = registry.create({ host: "Avery", hostId: "player-a", playerLimit: 2, isPrivate: true });
     assert.equal(room.isPrivate, true);
+    const migratedDatabase = new DatabaseSync(databasePath);
+    const gameColumns = migratedDatabase.prepare("PRAGMA table_info(room_games)").all() as unknown as { name: string }[];
+    migratedDatabase.close();
+    assert.equal(gameColumns.some((column) => column.name === "revision"), true);
   } finally {
     registry.close();
     rmSync(directory, { recursive: true, force: true });

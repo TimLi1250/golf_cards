@@ -26,6 +26,7 @@ export type GameView = {
   };
   canStart: boolean;
   game?: {
+    revision: number;
     holeNumber: number;
     holesToPlay: number;
     phase: "playing" | "scored" | "finished";

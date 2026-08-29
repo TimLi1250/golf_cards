@@ -248,7 +248,7 @@ export function keepDrawnCard(match: MatchState, playerId: string): void {
 
 /** Uses an eight that was just discarded to swap two unknown layout cards. */
 export function resolveSwapPower(match: MatchState, playerId: string, first?: LayoutCardReference, second?: LayoutCardReference): void {
-  assertPendingPower(match, playerId, "8");
+  const power = assertPendingPower(match, playerId, "8");
   if ((first && !second) || (!first && second)) throw new GolfRuleError("Choose two cards to swap, or skip the eight.");
   if (first && second) {
     assertLayoutReference(match, first);
@@ -259,7 +259,16 @@ export function resolveSwapPower(match: MatchState, playerId: string, first?: La
     const firstLayout = match.hole.layouts[first.playerId];
     const secondLayout = match.hole.layouts[second.playerId];
     [firstLayout[first.layoutIndex], secondLayout[second.layoutIndex]] = [secondLayout[second.layoutIndex], firstLayout[first.layoutIndex]];
+    power.used = true;
+    return;
   }
+  completePower(match, playerId);
+}
+
+/** Completes an eight after its resolved swap has remained visible. */
+export function completeSwapPower(match: MatchState, playerId: string): void {
+  const power = assertPendingPower(match, playerId, "8", true);
+  if (!power.used) throw new GolfRuleError("Choose two cards to swap before completing the eight.");
   completePower(match, playerId);
 }
 
@@ -612,6 +621,9 @@ function assertMatchingAvailable(match: MatchState): void {
   // before another match can safely change the discard pile.
   if (match.hole.pendingMatchGift) {
     throw new GolfRuleError("Finish the matching-card gift before calling another match.");
+  }
+  if (match.hole.pendingPower?.rank === "8" && match.hole.pendingPower.used) {
+    throw new GolfRuleError("Wait for the completed swap before calling another match.");
   }
 }
 

@@ -1,7 +1,7 @@
 import { createServer } from "node:http";
 import next from "next";
 import { Server } from "socket.io";
-import { type MatchResultEvent, type MatchTravelEvent, publishLobbyUpdate, publishRoomUpdate, roomEvents } from "./src/lib/realtime/room-events";
+import { type RealtimeGameEvent, publishLobbyUpdate, publishRoomUpdate, roomEvents } from "./src/lib/realtime/room-events";
 import { clearDisconnectDeadline, roomDisconnectDeadlines, setDisconnectDeadline } from "./src/lib/realtime/disconnect-state";
 import { persistentRoomRegistry } from "./src/lib/rooms/sqlite-registry";
 
@@ -95,8 +95,7 @@ async function bootstrap() {
 
   roomEvents.on("lobby:update", () => io.to("lobby").emit("lobby:update"));
   roomEvents.on("room:update", (inviteCode: string) => io.to(`room:${inviteCode}`).emit("room:update"));
-  roomEvents.on("match:travel", (inviteCode: string, event: MatchTravelEvent) => io.to(`room:${inviteCode}`).emit("match:travel", event));
-  roomEvents.on("match:result", (inviteCode: string, event: MatchResultEvent) => io.to(`room:${inviteCode}`).emit("match:result", event));
+  roomEvents.on("game:event", (inviteCode: string, event: RealtimeGameEvent) => io.to(`room:${inviteCode}`).emit("game:event", event));
   roomEvents.on("presence:update", (inviteCode: string, playerIds: string[]) => io.to(`room:${inviteCode}`).emit("presence:update", playerIds));
   roomEvents.on("chat:lobby", (message) => io.to("lobby").emit("chat:message", { channel: "lobby", message }));
   roomEvents.on("chat:room", (inviteCode: string, message) => io.to(`room:${inviteCode}`).emit("chat:message", { channel: "room", inviteCode, message }));

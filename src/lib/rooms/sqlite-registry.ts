@@ -7,6 +7,7 @@ import {
   keepDrawnCard,
   drawFromStock,
   claimOpponentMatch,
+  completeSwapPower,
   eliminatePlayer,
   giveMatchCard,
   knock,
@@ -238,7 +239,7 @@ export class SqliteRoomRegistry {
         const match = JSON.parse(storedGame.game_state) as MatchState;
         finished = removePlayer(match, `player-${playerIndex + 1}`).finished;
         match.lastEvent = { id: eventId(), message: `${players[playerIndex].name} left the game${finished ? "; the game is over." : "."}`, playerId: roomPlayerId, type: "leave" };
-        this.database.prepare("UPDATE room_games SET game_state = ?, last_activity_at = ?, inactivity_deadline = NULL WHERE room_id = ?").run(JSON.stringify(match), Date.now(), room.id);
+        this.database.prepare("UPDATE room_games SET game_state = ?, last_activity_at = ?, inactivity_deadline = NULL, revision = revision + 1 WHERE room_id = ?").run(JSON.stringify(match), Date.now(), room.id);
         if (finished) this.database.prepare("UPDATE rooms SET status = 'finished' WHERE id = ?").run(room.id);
       }
       this.database.prepare("DELETE FROM room_players WHERE room_id = ? AND id = ?").run(room.id, roomPlayerId);
@@ -272,7 +273,7 @@ export class SqliteRoomRegistry {
       const inactive = this.database.prepare("SELECT rooms.id, rooms.invite_code FROM rooms JOIN room_games ON room_games.room_id = rooms.id WHERE rooms.status = 'playing' AND room_games.inactivity_deadline IS NULL AND room_games.last_activity_at <= ?")
         .all(now - inactiveAfterMs) as unknown as { id: string; invite_code: string }[];
       for (const room of inactive) {
-        this.database.prepare("UPDATE room_games SET inactivity_deadline = ? WHERE room_id = ?").run(now + warningMs, room.id);
+        this.database.prepare("UPDATE room_games SET inactivity_deadline = ?, revision = revision + 1 WHERE room_id = ?").run(now + warningMs, room.id);
         warnedInviteCodes.push(room.invite_code);
       }
       this.database.exec("COMMIT");
@@ -289,7 +290,7 @@ export class SqliteRoomRegistry {
     const game = this.database.prepare("SELECT inactivity_deadline FROM room_games WHERE room_id = ?").get(room.id) as unknown as { inactivity_deadline: number | null } | undefined;
     if (!game) throw new RoomError("Game state could not be found.");
     if (game.inactivity_deadline !== null && game.inactivity_deadline <= now) throw new RoomError("This table's inactivity timer has expired.");
-    this.database.prepare("UPDATE room_games SET last_activity_at = ?, inactivity_deadline = NULL WHERE room_id = ?").run(now, room.id);
+    this.database.prepare("UPDATE room_games SET last_activity_at = ?, inactivity_deadline = NULL, revision = revision + 1 WHERE room_id = ?").run(now, room.id);
     return this.gameView(inviteCode, playerId);
   }
 
@@ -314,7 +315,7 @@ export class SqliteRoomRegistry {
     this.database.exec("BEGIN IMMEDIATE");
     try {
       this.database.prepare("UPDATE rooms SET status = 'playing' WHERE id = ?").run(room.id);
-      this.database.prepare("INSERT INTO room_games (room_id, game_state, last_activity_at, inactivity_deadline) VALUES (?, ?, ?, NULL) ON CONFLICT(room_id) DO UPDATE SET game_state = excluded.game_state, last_activity_at = excluded.last_activity_at, inactivity_deadline = NULL")
+      this.database.prepare("INSERT INTO room_games (room_id, game_state, last_activity_at, inactivity_deadline, revision) VALUES (?, ?, ?, NULL, 1) ON CONFLICT(room_id) DO UPDATE SET game_state = excluded.game_state, last_activity_at = excluded.last_activity_at, inactivity_deadline = NULL, revision = room_games.revision + 1")
         .run(room.id, JSON.stringify(match), Date.now());
       this.database.exec("COMMIT");
     } catch (error) {
@@ -338,7 +339,7 @@ export class SqliteRoomRegistry {
     const viewerIndex = players.findIndex((player) => player.id === playerId);
     if (viewerIndex === -1) throw new RoomError("Enter this table before viewing it.");
     const canStart = room.status === "lobby" && room.host_player_id === playerId;
-    const storedGame = this.database.prepare("SELECT game_state, inactivity_deadline FROM room_games WHERE room_id = ?").get(room.id) as unknown as { game_state: string; inactivity_deadline: number | null } | undefined;
+    const storedGame = this.database.prepare("SELECT game_state, inactivity_deadline, revision FROM room_games WHERE room_id = ?").get(room.id) as unknown as { game_state: string; inactivity_deadline: number | null; revision: number } | undefined;
     if (!storedGame) return { room: roomView, canStart };
 
     const match = JSON.parse(storedGame.game_state) as MatchState;
@@ -352,6 +353,7 @@ export class SqliteRoomRegistry {
     const pendingMatchGift = match.hole.pendingMatchGift;
     const viewerCanAct = match.status === "playing" && !isPeeking && match.hole.status === "playing" && !match.hole.finalMatchDeadline && !pendingMatchGift && currentEnginePlayer?.id === viewerEngineId;
     const pendingPower = match.hole.pendingPower;
+    const swapIsSettling = pendingPower?.rank === "8" && pendingPower.used === true;
     const pendingPowerIndex = pendingPower ? match.players.findIndex((player) => player.id === pendingPower.playerId) : -1;
     const viewPlayers = players.map((player, index) => {
       const enginePlayerId = `player-${index + 1}`;
@@ -377,6 +379,7 @@ export class SqliteRoomRegistry {
       room: roomView,
       canStart,
       game: {
+        revision: storedGame.revision,
         holeNumber: match.hole.number,
         holesToPlay: match.holesToPlay,
         phase,
@@ -402,15 +405,14 @@ export class SqliteRoomRegistry {
           playerId: players[pendingPowerIndex]?.id || "",
           playerName: match.players[pendingPowerIndex]?.name || "A player",
         } : undefined,
-        // Powers are resolved by their owner even after the normal turn has
-        // advanced. A used power is waiting only for its owner to continue,
-        // leaving them free to call a matching card first.
+        // A used J/Q waits for its owner to confirm the private reveal. A used
+        // eight is completed by the server after its one-second display pause.
         canUsePower: Boolean(pendingPower?.playerId === viewerEngineId && pendingPower?.used !== true),
-        canCompletePower: Boolean(pendingPower?.playerId === viewerEngineId),
+        canCompletePower: Boolean(pendingPower?.playerId === viewerEngineId && !swapIsSettling),
         // The discard remains a valid match target while somebody is holding
         // a stock card or resolving a power. A pending gift is deliberately
         // exclusive because it has an empty card slot to fill first.
-        canMatch: Boolean(discard) && match.status === "playing" && !isPeeking && match.hole.status === "playing" && !pendingMatchGift && Boolean(viewerEngineId && !match.eliminatedPlayerIds?.includes(viewerEngineId) && match.hole.layouts[viewerEngineId]?.some(Boolean)),
+        canMatch: Boolean(discard) && match.status === "playing" && !isPeeking && match.hole.status === "playing" && !pendingMatchGift && !swapIsSettling && Boolean(viewerEngineId && !match.eliminatedPlayerIds?.includes(viewerEngineId) && match.hole.layouts[viewerEngineId]?.some(Boolean)),
         pendingMatchGift: pendingMatchGift ? {
           playerId: players[match.players.findIndex((player) => player.id === pendingMatchGift.playerId)]?.id || "",
           playerName: match.players.find((player) => player.id === pendingMatchGift.playerId)?.name || "A player",
@@ -575,6 +577,20 @@ export class SqliteRoomRegistry {
     return { view: this.gameView(inviteCode, roomPlayerId), privatePeek, privatePowerPeek, privateSelfReveal };
   }
 
+  finishSwapPower(inviteCode: string, roomPlayerId: string): GameView {
+    const room = this.requireRoom(inviteCode);
+    if (room.status !== "playing") throw new RoomError("This game has not started.");
+    const players = this.playersFor(room.id);
+    const playerIndex = players.findIndex((player) => player.id === roomPlayerId);
+    if (playerIndex === -1) throw new RoomError("Join this game before taking an action.");
+    const storedGame = this.database.prepare("SELECT game_state FROM room_games WHERE room_id = ?").get(room.id) as unknown as { game_state: string } | undefined;
+    if (!storedGame) throw new RoomError("Game state could not be found.");
+    const match = JSON.parse(storedGame.game_state) as MatchState;
+    completeSwapPower(match, `player-${playerIndex + 1}`);
+    this.saveMatch(room.id, match);
+    return this.gameView(inviteCode, roomPlayerId);
+  }
+
   private migrate() {
     this.database.exec(`
       CREATE TABLE IF NOT EXISTS rooms (
@@ -600,7 +616,8 @@ export class SqliteRoomRegistry {
         room_id TEXT PRIMARY KEY REFERENCES rooms(id) ON DELETE CASCADE,
         game_state TEXT NOT NULL,
         last_activity_at INTEGER NOT NULL DEFAULT 0,
-        inactivity_deadline INTEGER
+        inactivity_deadline INTEGER,
+        revision INTEGER NOT NULL DEFAULT 0
       ) STRICT;
       CREATE TABLE IF NOT EXISTS player_profiles (
         id TEXT PRIMARY KEY,
@@ -632,6 +649,9 @@ export class SqliteRoomRegistry {
     }
     if (!gameColumns.some((column) => column.name === "inactivity_deadline")) {
       this.database.exec("ALTER TABLE room_games ADD COLUMN inactivity_deadline INTEGER;");
+    }
+    if (!gameColumns.some((column) => column.name === "revision")) {
+      this.database.exec("ALTER TABLE room_games ADD COLUMN revision INTEGER NOT NULL DEFAULT 0;");
     }
     this.database.prepare("UPDATE room_games SET last_activity_at = ? WHERE last_activity_at = 0").run(Date.now());
     this.database.exec("INSERT OR IGNORE INTO player_profiles (id, name) SELECT id, name FROM room_players;");
@@ -687,7 +707,7 @@ export class SqliteRoomRegistry {
   private saveMatch(roomId: string, match: MatchState): void {
     this.database.exec("BEGIN IMMEDIATE");
     try {
-      this.database.prepare("UPDATE room_games SET game_state = ?, last_activity_at = ?, inactivity_deadline = NULL WHERE room_id = ?").run(JSON.stringify(match), Date.now(), roomId);
+      this.database.prepare("UPDATE room_games SET game_state = ?, last_activity_at = ?, inactivity_deadline = NULL, revision = revision + 1 WHERE room_id = ?").run(JSON.stringify(match), Date.now(), roomId);
       if (match.status === "finished") this.database.prepare("UPDATE rooms SET status = 'finished' WHERE id = ?").run(roomId);
       this.database.exec("COMMIT");
     } catch (error) {

@@ -4,7 +4,7 @@ import { OUT_GIF_DURATION_MS, SAFE_GIF_DURATION_MS, matchTravelDuration, waitFor
 import type { GameAction, MatchAction } from "../../../../../lib/golf/protocol";
 import { RoomError } from "../../../../../lib/rooms/registry";
 import { persistentRoomRegistry } from "../../../../../lib/rooms/sqlite-registry";
-import { publishLobbyUpdate, publishMatchResult, publishMatchTravel, publishRoomUpdate } from "../../../../../lib/realtime/room-events";
+import { publishGameEvent, publishLobbyUpdate, publishRoomUpdate } from "../../../../../lib/realtime/room-events";
 
 export const dynamic = "force-dynamic";
 
@@ -38,26 +38,46 @@ export async function POST(request: NextRequest, context: RouteContext) {
       const attempt = registry.previewMatchAttempt(inviteCode, body.playerId, body.action);
       const attemptId = randomUUID();
       const durationMs = matchTravelDuration(attempt.correct);
-      publishMatchTravel(inviteCode, {
+      publishGameEvent(inviteCode, {
         id: attemptId,
-        playerId: body.playerId,
-        targetPlayerId: attempt.targetPlayerId,
-        layoutIndex: body.action.layoutIndex,
+        type: "match:travel",
+        occurredAt: Date.now(),
         durationMs,
+        payload: {
+          playerId: body.playerId,
+          targetPlayerId: attempt.targetPlayerId,
+          layoutIndex: body.action.layoutIndex,
+        },
       });
       await waitForMatchTravel(durationMs);
       if (!registry.isMatchAttemptCurrent(inviteCode, body.playerId, body.action, attempt)) {
         return NextResponse.json({ view: registry.gameView(inviteCode, body.playerId), matchAttemptCancelled: true });
       }
       result = registry.act(inviteCode, body.playerId, body.action);
-      publishMatchResult(inviteCode, {
+      publishGameEvent(inviteCode, {
         id: attemptId,
-        playerName: attempt.playerName,
-        outcome: attempt.correct ? "safe" : "out",
+        type: "match:result",
+        occurredAt: Date.now(),
         durationMs: attempt.correct ? SAFE_GIF_DURATION_MS : OUT_GIF_DURATION_MS,
+        payload: {
+          playerName: attempt.playerName,
+          outcome: attempt.correct ? "safe" : "out",
+        },
       });
     } else {
       result = registry.act(inviteCode, body.playerId, body.action);
+      if (body.action.type === "use-swap-power" && body.action.first && body.action.second && result.view.game?.lastEvent?.id) {
+        publishGameEvent(inviteCode, {
+          id: result.view.game.lastEvent.id,
+          type: "swap:travel",
+          occurredAt: Date.now(),
+          durationMs: 6_000,
+          payload: { cards: [body.action.first, body.action.second], travelDurationMs: 900 },
+        });
+        publishRoomUpdate(inviteCode);
+        await new Promise((resolve) => setTimeout(resolve, 1_000));
+        result = { view: registry.finishSwapPower(inviteCode, body.playerId) };
+      }
     }
     publishRoomUpdate(inviteCode);
     publishLobbyUpdate();

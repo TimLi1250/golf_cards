@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   GolfRuleError,
   claimOpponentMatch,
+  completeSwapPower,
   createDeck,
   createMatch,
   currentPlayer,
@@ -128,6 +129,10 @@ test("an eight pauses the turn for an optional blind swap", () => {
   resolveSwapPower(match, "player-2", { playerId: "player-1", layoutIndex: 0 }, { playerId: "player-3", layoutIndex: 1 });
   assert.equal(match.hole.layouts["player-1"][0], second);
   assert.equal(match.hole.layouts["player-3"][1], first);
+  assert.deepEqual(match.hole.pendingPower, { rank: "8", playerId: "player-2", used: true });
+  assert.equal(currentPlayer(match).id, "player-2", "the turn stays put while the swap is displayed");
+  assert.throws(() => previewOwnDiscardMatch(match, "player-1", 0), GolfRuleError);
+  completeSwapPower(match, "player-2");
   assert.equal(currentPlayer(match).id, "player-3");
 });
 
@@ -228,6 +233,7 @@ test("matched power cards wait their turn and resolve in order", () => {
   resolveSwapPower(match, "player-2", { playerId: "player-1", layoutIndex: 1 }, { playerId: "player-3", layoutIndex: 1 });
   assert.equal(match.hole.layouts["player-1"][1], second, "the original eight resolves first");
   assert.equal(match.hole.layouts["player-3"][1], first);
+  completeSwapPower(match, "player-2");
   assert.deepEqual(match.hole.pendingPower, { rank: "8", playerId: "player-1", endsTurn: false });
   assert.equal(currentPlayer(match).id, "player-3", "the normal turn advances once before the matched power");
 

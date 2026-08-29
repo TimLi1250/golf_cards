@@ -1,20 +1,26 @@
 import { EventEmitter } from "node:events";
 import type { ChatMessage } from "../chat";
 
-export type MatchTravelEvent = {
+type GameEventBase = {
   id: string;
-  playerId: string;
-  targetPlayerId: string;
-  layoutIndex: number;
+  occurredAt: number;
   durationMs: number;
 };
 
-export type MatchResultEvent = {
-  id: string;
-  playerName: string;
-  outcome: "safe" | "out";
-  durationMs: number;
-};
+export type RealtimeGameEvent = GameEventBase & (
+  | {
+    type: "swap:travel";
+    payload: { cards: { playerId: string; layoutIndex: number }[]; travelDurationMs: number };
+  }
+  | {
+    type: "match:travel";
+    payload: { playerId: string; targetPlayerId: string; layoutIndex: number };
+  }
+  | {
+    type: "match:result";
+    payload: { playerName: string; outcome: "safe" | "out" };
+  }
+);
 
 declare global {
   var fairwayFourRoomEvents: EventEmitter | undefined;
@@ -31,12 +37,8 @@ export function publishRoomUpdate(inviteCode: string): void {
   roomEvents.emit("room:update", inviteCode);
 }
 
-export function publishMatchTravel(inviteCode: string, event: MatchTravelEvent): void {
-  roomEvents.emit("match:travel", inviteCode.toUpperCase(), event);
-}
-
-export function publishMatchResult(inviteCode: string, event: MatchResultEvent): void {
-  roomEvents.emit("match:result", inviteCode.toUpperCase(), event);
+export function publishGameEvent(inviteCode: string, event: RealtimeGameEvent): void {
+  roomEvents.emit("game:event", inviteCode.toUpperCase(), event);
 }
 
 export function publishPresenceUpdate(inviteCode: string, playerIds: string[]): void {
