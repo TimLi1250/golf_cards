@@ -199,6 +199,8 @@ export class SqliteRoomRegistry {
       if (room.is_private && input.accessCode?.trim().toUpperCase() !== room.invite_code) {
         throw new RoomError("Enter the correct invite code to join this private table.");
       }
+      const duplicateName = this.database.prepare("SELECT 1 FROM room_players WHERE room_id = ? AND id != ? AND name = ? COLLATE NOCASE").get(room.id, playerId, playerName);
+      if (duplicateName) throw new RoomError("A player with that name is already at this table.");
       const existing = this.database.prepare("SELECT id FROM room_players WHERE room_id = ? AND id = ?").get(room.id, playerId);
       if (existing) {
         this.database.prepare("UPDATE room_players SET name = ? WHERE room_id = ? AND id = ?").run(playerName, room.id, playerId);
@@ -351,8 +353,8 @@ export class SqliteRoomRegistry {
     const activeEnginePlayers = match.players.filter((player) => !match.eliminatedPlayerIds?.includes(player.id));
     const isPeeking = match.status === "playing" && match.hole.status === "playing" && activeEnginePlayers.some((player) => !match.hole.peekedPlayerIds.includes(player.id));
     const pendingMatchGift = match.hole.pendingMatchGift;
-    const viewerCanAct = match.status === "playing" && !isPeeking && match.hole.status === "playing" && !match.hole.finalMatchDeadline && !pendingMatchGift && currentEnginePlayer?.id === viewerEngineId;
     const pendingPower = match.hole.pendingPower;
+    const viewerCanAct = match.status === "playing" && !isPeeking && match.hole.status === "playing" && !match.hole.finalMatchDeadline && !pendingMatchGift && !pendingPower && currentEnginePlayer?.id === viewerEngineId;
     const swapIsSettling = pendingPower?.rank === "8" && pendingPower.used === true;
     const pendingPowerIndex = pendingPower ? match.players.findIndex((player) => player.id === pendingPower.playerId) : -1;
     const viewPlayers = players.map((player, index) => {
@@ -506,19 +508,22 @@ export class SqliteRoomRegistry {
         break;
       }
       case "use-peek-power": {
+        const powerRank = match.hole.pendingPower?.rank;
         const target = engineReference(action.targetPlayerId, action.layoutIndex);
         const card = resolvePeekPower(match, enginePlayerId, target);
         eventType = "power-peek";
-        eventMessage = `${players[playerIndex]?.name || "A player"} used a ${match.hole.discard.at(-1)?.rank || "power"} to inspect a card.`;
+        eventMessage = `${players[playerIndex]?.name || "A player"} used a ${powerRank || "power"} to inspect a card.`;
         affectedCards = [{ playerId: action.targetPlayerId, layoutIndex: action.layoutIndex }];
         privatePowerPeek = { playerId: action.targetPlayerId, layoutIndex: action.layoutIndex, card: publicCard(card) };
         break;
       }
-      case "skip-power":
+      case "skip-power": {
+        const powerRank = match.hole.pendingPower?.rank;
         skipPower(match, enginePlayerId);
         eventType = "skip-power";
-        eventMessage = `${players[playerIndex]?.name || "A player"} skipped the power card.`;
+        eventMessage = `${players[playerIndex]?.name || "A player"} skipped the ${powerRank ? `${powerRank} power` : "power"} card.`;
         break;
+      }
       case "match-own": {
         const result = matchDiscard(match, enginePlayerId, action.layoutIndex);
         eventType = "match-own";

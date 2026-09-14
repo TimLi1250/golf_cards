@@ -19,6 +19,20 @@ test("joins available rooms once per player session and enforces capacity", () =
   assert.throws(() => registry.join(room.inviteCode, { playerId: "player-c", playerName: "Casey" }), RoomError);
 });
 
+test("rejects duplicate table names regardless of capitalization", () => {
+  const registry = new RoomRegistry();
+  const room = registry.create({ host: "Avery", hostId: "player-a", playerLimit: 3 });
+  assert.throws(
+    () => registry.join(room.inviteCode, { playerId: "player-b", playerName: "avery" }),
+    /already at this table/,
+  );
+  registry.join(room.inviteCode, { playerId: "player-b", playerName: "Blake" });
+  assert.throws(
+    () => registry.join(room.inviteCode, { playerId: "player-b", playerName: "AVERY" }),
+    /already at this table/,
+  );
+});
+
 test("requires the invite code for private tables", () => {
   const registry = new RoomRegistry();
   const room = registry.create({ host: "Avery", hostId: "player-a", playerLimit: 3, isPrivate: true });

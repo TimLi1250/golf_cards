@@ -75,6 +75,10 @@ test("supports up to twelve players and adds a second deck after six players", (
   assert.throws(() => createMatch(Array.from({ length: 13 }, (_, index) => `Player ${index}`)), GolfRuleError);
 });
 
+test("rejects duplicate player names regardless of capitalization", () => {
+  assert.throws(() => createMatch(["Avery", " avery "]), /different names/);
+});
+
 test("initial peek is private-use-once and exposes the player-facing pair", () => {
   const match = createMatch(players, { random: deterministicRandom });
   const peeked = peekInitialCards(match, "player-1");
@@ -217,6 +221,21 @@ test("a correct arrival changes the discard identity and expires a slower attemp
   assert.notEqual(currentAttempt.discardCardId, slowerAttempt.discardCardId);
 });
 
+test("a matched power preempts an otherwise idle normal turn", () => {
+  const match = createMatch(players, { random: deterministicRandom });
+  completeInitialPeeks(match);
+  match.hole.discard = [{ id: "J-discard", rank: "J", suit: "clubs" }];
+  match.hole.layouts["player-1"][0] = { id: "J-match", rank: "J", suit: "hearts" };
+
+  assert.equal(matchDiscard(match, "player-1", 0).correct, true);
+  assert.deepEqual(match.hole.pendingPower, { rank: "J", playerId: "player-1", endsTurn: false });
+  assert.throws(() => drawFromStock(match, "player-2"), /power card/);
+
+  skipPower(match, "player-1");
+  assert.equal(currentPlayer(match).id, "player-2");
+  assert.ok(drawFromStock(match, "player-2"));
+});
+
 test("matched power cards wait their turn and resolve in order", () => {
   const match = createMatch(players, { random: deterministicRandom });
   completeInitialPeeks(match);
@@ -260,7 +279,7 @@ test("a Jack found with a Jack can be matched for another private peek", () => {
 
 test("the last active player wins the hole and leaves all cards available for scoring", () => {
   const match = createMatch(players.slice(0, 3), { random: deterministicRandom });
-  assert.equal(eliminatePlayer(match, "player-2").advanced, false);
+  assert.equal(eliminatePlayer(match, "player-2").advanced, true);
   const result = eliminatePlayer(match, "player-3");
   assert.equal(result.winnerId, "player-1");
   assert.equal(result.advanced, false);
@@ -271,6 +290,38 @@ test("the last active player wins the hole and leaves all cards available for sc
   startNextHole(match);
   assert.equal(match.hole.number, 2);
   assert.deepEqual(match.eliminatedPlayerIds, undefined);
+});
+
+test("eliminating the current player clears their held card and advances safely", () => {
+  const match = createMatch(players, { random: deterministicRandom });
+  completeInitialPeeks(match);
+  match.hole.discard = [{ id: "5-discard", rank: "5", suit: "clubs" }];
+  match.hole.layouts["player-2"][0] = { id: "wrong-4", rank: "4", suit: "hearts" };
+  const heldCard = drawFromStock(match, "player-2");
+
+  assert.equal(matchDiscard(match, "player-2", 0).correct, false);
+  const result = eliminatePlayer(match, "player-2");
+
+  assert.equal(result.advanced, true);
+  assert.equal(match.hole.heldCard, undefined);
+  assert.equal(match.hole.discard.at(-1)?.id, heldCard.id);
+  assert.equal(currentPlayer(match).id, "player-3");
+  assert.ok(drawFromStock(match, "player-3"));
+});
+
+test("eliminating a power owner activates the next power before normal play", () => {
+  const match = createMatch(players, { random: deterministicRandom });
+  completeInitialPeeks(match);
+  match.hole.pendingPower = { rank: "J", playerId: "player-2" };
+  match.hole.pendingPowerQueue = [{ rank: "Q", playerId: "player-1", endsTurn: false }];
+
+  eliminatePlayer(match, "player-2");
+
+  assert.equal(currentPlayer(match).id, "player-3");
+  assert.deepEqual(match.hole.pendingPower, { rank: "Q", playerId: "player-1", endsTurn: false });
+  assert.throws(() => drawFromStock(match, "player-3"), /power card/);
+  skipPower(match, "player-1");
+  assert.ok(drawFromStock(match, "player-3"));
 });
 
 test("knock gives every other player one turn then opens a five-second matching window", () => {
@@ -300,6 +351,28 @@ test("a knock during final turns passes without rebuilding the final-turn queue"
   assert.equal(match.hole.knockerId, "player-2");
   assert.deepEqual(match.hole.finalTurnQueue, ["player-4", "player-1"]);
   assert.equal(currentPlayer(match).id, "player-4");
+});
+
+test("queued powers resolve before a finished final-turn sequence can score", () => {
+  const match = createMatch(players, { random: deterministicRandom });
+  completeInitialPeeks(match);
+  knock(match, "player-2");
+  finishStockTurn(match, "player-3");
+  finishStockTurn(match, "player-4");
+  match.hole.discard = [{ id: "Q-discard", rank: "Q", suit: "clubs" }];
+  match.hole.layouts["player-2"][0] = { id: "Q-match", rank: "Q", suit: "hearts" };
+  match.hole.heldCard = { card: { id: "3-held", rank: "3", suit: "diamonds" }, source: "stock" };
+
+  assert.equal(matchDiscard(match, "player-2", 0).correct, true);
+  assert.equal(match.hole.pendingPower, undefined, "the power waits while the current draw is unresolved");
+  discardDrawnStockCard(match, "player-1");
+
+  assert.ok(match.hole.finalMatchDeadline);
+  assert.deepEqual(match.hole.pendingPower, { rank: "Q", playerId: "player-2", endsTurn: false });
+  assert.throws(() => finalizeKnock(match, match.hole.finalMatchDeadline), /power cards/);
+  skipPower(match, "player-2");
+  finalizeKnock(match, match.hole.finalMatchDeadline);
+  assert.equal(match.hole.status, "scored");
 });
 
 test("scores cards and progresses to the next hole", () => {
@@ -348,6 +421,21 @@ test("removes a departing player and hands their turn to the next player", () =>
   assert.equal(currentPlayer(match).name, "Casey");
   assert.equal(Object.keys(match.hole.layouts).length, 3);
   assert.equal(match.hole.layouts["player-2"].length, 4);
+});
+
+test("removing a power owner activates the next queued power", () => {
+  const match = createMatch(players, { random: deterministicRandom });
+  completeInitialPeeks(match);
+  match.hole.pendingPower = { rank: "J", playerId: "player-2" };
+  match.hole.pendingPowerQueue = [{ rank: "Q", playerId: "player-1", endsTurn: false }];
+
+  removePlayer(match, "player-2");
+
+  assert.equal(currentPlayer(match).name, "Casey");
+  assert.deepEqual(match.hole.pendingPower, { rank: "Q", playerId: "player-1", endsTurn: false });
+  assert.throws(() => drawFromStock(match, "player-2"), /power card/);
+  skipPower(match, "player-1");
+  assert.ok(drawFromStock(match, "player-2"));
 });
 
 test("ends a match when a departure leaves one player", () => {

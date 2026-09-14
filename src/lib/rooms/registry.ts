@@ -69,6 +69,9 @@ export class RoomRegistry {
     const playerId = cleanText(input.playerId, "", 100);
     const playerName = cleanText(input.playerName, "Guest player", 24);
     if (!playerId) throw new RoomError("A player session is required to join a game.");
+    if (room.players.some((player) => player.id !== playerId && samePlayerName(player.name, playerName))) {
+      throw new RoomError("A player with that name is already at this table.");
+    }
 
     const existingPlayer = room.players.find((player) => player.id === playerId);
     if (existingPlayer) {
@@ -98,6 +101,10 @@ export class RoomRegistry {
 function cleanText(value: string | undefined, fallback: string, maxLength: number): string {
   const cleaned = value?.trim().replace(/\s+/g, " ").slice(0, maxLength);
   return cleaned || fallback;
+}
+
+function samePlayerName(first: string, second: string): boolean {
+  return first.toLowerCase() === second.toLowerCase();
 }
 
 function copyRoom(room: Room): PublicRoom {

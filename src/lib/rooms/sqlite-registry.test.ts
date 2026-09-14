@@ -28,6 +28,26 @@ test("persists rooms when a fresh registry opens the same database", () => {
   }
 });
 
+test("rejects duplicate table names regardless of capitalization", () => {
+  const directory = mkdtempSync(join(tmpdir(), "fairway-four-names-"));
+  const registry = new SqliteRoomRegistry(join(directory, "rooms.sqlite"));
+  try {
+    const room = registry.create({ host: "Avery", hostId: "player-a", playerLimit: 3 });
+    assert.throws(
+      () => registry.join(room.inviteCode, { playerId: "player-b", playerName: "avery" }),
+      /already at this table/,
+    );
+    registry.join(room.inviteCode, { playerId: "player-b", playerName: "Blake" });
+    assert.throws(
+      () => registry.join(room.inviteCode, { playerId: "player-b", playerName: "AVERY" }),
+      /already at this table/,
+    );
+  } finally {
+    registry.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("stores chat history and keeps table chat private to seated players", () => {
   const directory = mkdtempSync(join(tmpdir(), "fairway-four-chat-"));
   const databasePath = join(directory, "rooms.sqlite");
@@ -86,6 +106,38 @@ test("stores an authoritative game while keeping layout card faces private", () 
   }
 });
 
+test("uses pending power identity and blocks the normal turn while it resolves", () => {
+  const directory = mkdtempSync(join(tmpdir(), "fairway-four-power-priority-"));
+  const databasePath = join(directory, "rooms.sqlite");
+  const registry = new SqliteRoomRegistry(databasePath);
+  try {
+    const room = registry.create({ host: "Avery", hostId: "player-a", playerLimit: 2 });
+    registry.join(room.inviteCode, { playerId: "player-b", playerName: "Blake" });
+    registry.startGame(room.inviteCode, "player-a");
+
+    const database = new DatabaseSync(databasePath);
+    const stored = database.prepare("SELECT game_state FROM room_games WHERE room_id = ?").get(room.id) as { game_state: string };
+    const match = JSON.parse(stored.game_state) as { players: { id: string }[]; hole: { peekedPlayerIds: string[]; pendingPower?: { rank: string; playerId: string }; discard: unknown[] } };
+    match.hole.peekedPlayerIds = match.players.map((player) => player.id);
+    match.hole.pendingPower = { rank: "J", playerId: "player-2" };
+    match.hole.discard = [{ id: "K-discard", rank: "K", suit: "clubs" }];
+    database.prepare("UPDATE room_games SET game_state = ? WHERE room_id = ?").run(JSON.stringify(match), room.id);
+    database.close();
+
+    const pendingView = registry.gameView(room.inviteCode, "player-b");
+    assert.equal(pendingView.game?.currentPlayerName, "Blake");
+    assert.equal(pendingView.game?.canAct, false);
+    assert.equal(pendingView.game?.canUsePower, true);
+
+    const peek = registry.act(room.inviteCode, "player-b", { type: "use-peek-power", targetPlayerId: "player-b", layoutIndex: 0 });
+    assert.match(peek.view.game?.lastEvent?.message || "", /used a J to inspect/);
+    assert.doesNotMatch(peek.view.game?.lastEvent?.message || "", /K/);
+  } finally {
+    registry.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("removes a departing player from an active game for every remaining player", () => {
   const directory = mkdtempSync(join(tmpdir(), "fairway-four-active-leave-"));
   const registry = new SqliteRoomRegistry(join(directory, "rooms.sqlite"));
@@ -118,9 +170,10 @@ test("eliminates a player who calls a wrong match while the other players contin
 
     const database = new DatabaseSync(databasePath);
     const stored = database.prepare("SELECT game_state FROM room_games WHERE room_id = ?").get(room.id) as { game_state: string };
-    const match = JSON.parse(stored.game_state) as { players: { id: string }[]; hole: { peekedPlayerIds: string[]; discard: unknown[]; layouts: Record<string, unknown[]> } };
+    const match = JSON.parse(stored.game_state) as { players: { id: string }[]; hole: { peekedPlayerIds: string[]; discard: unknown[]; heldCard?: unknown; layouts: Record<string, unknown[]> } };
     match.hole.peekedPlayerIds = match.players.map((player) => player.id);
     match.hole.discard = [{ id: "discard-5", rank: "5", suit: "clubs" }];
+    match.hole.heldCard = { card: { id: "orphaned-draw", rank: "9", suit: "diamonds" }, source: "stock" };
     match.hole.layouts["player-2"][0] = { id: "wrong-4", rank: "4", suit: "hearts" };
     database.prepare("UPDATE room_games SET game_state = ? WHERE room_id = ?").run(JSON.stringify(match), room.id);
     database.close();
@@ -139,8 +192,11 @@ test("eliminates a player who calls a wrong match while the other players contin
     assert.deepEqual(wrongGuess.view.game?.players.find((player) => player.name === "Blake")?.cards, [null, null, null, null]);
     assert.deepEqual(registry.get(room.inviteCode).players.map((player) => player.name), ["Avery", "Blake", "Casey"]);
     const remainingView = registry.gameView(room.inviteCode, "player-a");
+    const nextPlayerView = registry.gameView(room.inviteCode, "player-c");
     assert.equal(remainingView.game?.phase, "playing");
     assert.equal(remainingView.game?.currentPlayerName, "Casey");
+    assert.equal(nextPlayerView.game?.canAct, true);
+    assert.equal(nextPlayerView.game?.heldCard, undefined);
     assert.equal(remainingView.game?.players.find((player) => player.name === "Blake")?.isOut, true);
     assert.deepEqual(remainingView.game?.players.find((player) => player.name === "Blake")?.cards, [null, null, null, null]);
   } finally {

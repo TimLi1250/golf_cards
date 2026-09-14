@@ -129,9 +129,13 @@ export function createMatch(
   if (playerNames.length < 2 || playerNames.length > 12) {
     throw new GolfRuleError("Golf needs between two and twelve players.");
   }
-  const players = playerNames.map((name, index) => ({
+  const normalizedNames = playerNames.map((name, index) => name.trim() || `Player ${index + 1}`);
+  if (new Set(normalizedNames.map((name) => name.toLowerCase())).size !== normalizedNames.length) {
+    throw new GolfRuleError("Players at the same table must have different names.");
+  }
+  const players = normalizedNames.map((name, index) => ({
     id: `player-${index + 1}`,
-    name: name.trim() || `Player ${index + 1}`,
+    name,
     totalScore: 0,
   }));
   return {
@@ -374,6 +378,7 @@ export function knock(match: MatchState, playerId: string): void {
   assertTurn(match, playerId);
   assertInitialPeekComplete(match);
   if (match.hole.heldCard) throw new GolfRuleError("Finish the current draw before knocking.");
+  if (match.hole.pendingPower || match.hole.pendingPowerQueue?.length) throw new GolfRuleError("Finish the power cards before knocking.");
   if (match.hole.pendingMatchGift) throw new GolfRuleError("Finish the matching-card gift before knocking.");
   if (match.hole.knockerId) {
     endTurn(match, playerId);
@@ -392,6 +397,7 @@ export function finalizeKnock(match: MatchState, now = Date.now()): void {
   if (!deadline) throw new GolfRuleError("The final matching window has not started.");
   if (now < deadline) throw new GolfRuleError("The final matching window is still open.");
   if (match.hole.pendingMatchGift) throw new GolfRuleError("Finish the matching-card gift before scoring.");
+  if (match.hole.pendingPower || match.hole.pendingPowerQueue?.length) throw new GolfRuleError("Finish the power cards before scoring.");
   match.hole.finalMatchDeadline = undefined;
   scoreHole(match);
 }
@@ -437,11 +443,13 @@ export function eliminatePlayer(match: MatchState, playerId: string): { remainin
   assertPlaying(match);
   assertActivePlayer(match, playerId);
   const { hole } = match;
-  match.eliminatedPlayerIds = [...(match.eliminatedPlayerIds ?? []), playerId];
-  if (hole.pendingPower?.playerId === playerId) {
-    hole.pendingPower = undefined;
-    activateQueuedPower(match);
+  const wasCurrentPlayer = currentPlayer(match).id === playerId;
+  if (wasCurrentPlayer && hole.heldCard) {
+    hole.discard.push(hole.heldCard.card);
+    hole.heldCard = undefined;
   }
+  match.eliminatedPlayerIds = [...(match.eliminatedPlayerIds ?? []), playerId];
+  if (hole.pendingPower?.playerId === playerId) hole.pendingPower = undefined;
   hole.pendingPowerQueue = hole.pendingPowerQueue?.filter((power) => power.playerId !== playerId);
   if (hole.finalTurnQueue) hole.finalTurnQueue = hole.finalTurnQueue.filter((id) => id !== playerId);
 
@@ -462,15 +470,18 @@ export function eliminatePlayer(match: MatchState, playerId: string): { remainin
     return { remainingActivePlayers, finished: false, winnerId: winner.id, advanced: false };
   }
 
-  if (currentPlayer(match).id === playerId) {
+  let advanced = false;
+  if (wasCurrentPlayer) {
     if (hole.finalTurnQueue) {
-      if (hole.finalTurnQueue.length === 0) scoreHole(match);
+      if (hole.finalTurnQueue.length === 0) hole.finalMatchDeadline ??= Date.now() + 5_000;
       else hole.currentPlayerIndex = match.players.findIndex((player) => player.id === hole.finalTurnQueue?.[0]);
     } else {
       hole.currentPlayerIndex = nextActivePlayerIndex(match, hole.currentPlayerIndex);
     }
+    advanced = true;
   }
-  return { remainingActivePlayers, finished: match.status === "finished", advanced: false };
+  activateQueuedPower(match);
+  return { remainingActivePlayers, finished: match.status === "finished", advanced };
 }
 
 /** Removes a player from an active match while keeping the current hole valid. */
@@ -550,6 +561,7 @@ export function removePlayer(match: MatchState, playerId: string): { remainingPl
     if (match.status === "playing" && isEliminated(match, currentPlayer(match).id)) {
       hole.currentPlayerIndex = nextActivePlayerIndex(match, hole.currentPlayerIndex);
     }
+    activateQueuedPower(match);
   }
 
   return { remainingPlayers: match.players.length, finished: match.status === "finished" };
@@ -562,6 +574,7 @@ function endTurn(match: MatchState, playerId: string): void {
     hole.finalTurnQueue.shift();
     if (hole.finalTurnQueue.length === 0) {
       hole.finalMatchDeadline = Date.now() + 5_000;
+      activateQueuedPower(match);
       return;
     }
     hole.currentPlayerIndex = players.findIndex((player) => player.id === hole.finalTurnQueue?.[0]);
@@ -602,6 +615,7 @@ function assertCanDraw(match: MatchState, playerId: string): void {
   assertInitialPeekComplete(match);
   if (match.hole.heldCard) throw new GolfRuleError("Resolve the drawn card before drawing again.");
   if (match.hole.pendingPower) throw new GolfRuleError("Use or skip the power card before drawing again.");
+  if (match.hole.pendingPowerQueue?.length) throw new GolfRuleError("Use or skip the power card before drawing again.");
   if (match.hole.pendingMatchGift) throw new GolfRuleError("Finish the matching-card gift before drawing again.");
 }
 
@@ -669,14 +683,14 @@ function resolveDiscardPowerOrEndTurn(match: MatchState, playerId: string, disca
 }
 
 /**
- * A matched power card is resolved after the turn/power already in progress.
- * This preserves the order of play while allowing rapid calls against the
- * current discard (including several eights in a row).
+ * A matched power card preempts the next normal draw, but waits for a held
+ * card, matching-card gift, or power already being resolved.
  */
 function queueMatchedPower(match: MatchState, playerId: string, card: Card): void {
   if (!isPowerCard(card)) return;
   match.hole.pendingPowerQueue ??= [];
   match.hole.pendingPowerQueue.push({ rank: card.rank, playerId, endsTurn: false });
+  activateQueuedPower(match);
 }
 
 function completePower(match: MatchState, playerId: string): void {
@@ -692,7 +706,7 @@ function completePower(match: MatchState, playerId: string): void {
 
 function activateQueuedPower(match: MatchState): void {
   const { hole } = match;
-  if (hole.pendingPower || hole.finalMatchDeadline) return;
+  if (hole.pendingPower || hole.heldCard || hole.pendingMatchGift) return;
   while (hole.pendingPowerQueue?.length) {
     const next = hole.pendingPowerQueue.shift();
     if (next && !isEliminated(match, next.playerId) && match.players.some((player) => player.id === next.playerId)) {
