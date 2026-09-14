@@ -7,20 +7,24 @@ type GameEventBase = {
   durationMs: number;
 };
 
-export type RealtimeGameEvent = GameEventBase & (
-  | {
-    type: "swap:travel";
-    payload: { cards: { playerId: string; layoutIndex: number }[]; travelDurationMs: number };
-  }
-  | {
-    type: "match:travel";
-    payload: { playerId: string; targetPlayerId: string; layoutIndex: number };
-  }
-  | {
-    type: "match:result";
-    payload: { playerName: string; outcome: "safe" | "out" };
-  }
-);
+export type MatchOutcome = "safe" | "out" | "cancelled";
+
+type SwapTravelEvent = GameEventBase & {
+  type: "swap:travel";
+  payload: { cards: { playerId: string; layoutIndex: number }[]; travelDurationMs: number };
+};
+
+type MatchTravelEvent = GameEventBase & {
+  type: "match:travel";
+  payload: { playerId: string; targetPlayerId: string; layoutIndex: number };
+};
+
+export type MatchResultEvent = GameEventBase & {
+  type: "match:result";
+  payload: { playerName: string; outcome: MatchOutcome };
+};
+
+export type RealtimeGameEvent = SwapTravelEvent | MatchTravelEvent | MatchResultEvent;
 
 declare global {
   var fairwayFourRoomEvents: EventEmitter | undefined;

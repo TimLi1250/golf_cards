@@ -10,9 +10,9 @@ import GameAudio from "../../../components/game-audio";
 import GameResultAudio from "../../../components/game-result-audio";
 import type { GameAction, GameView, PublicCard } from "../../../lib/golf/protocol";
 import { copyText, playerProfile, savePlayerName } from "../../../lib/player-session";
-import type { RealtimeGameEvent } from "../../../lib/realtime/room-events";
+import type { MatchOutcome, MatchResultEvent, RealtimeGameEvent } from "../../../lib/realtime/room-events";
 
-type GameResponse = { view?: GameView; needsEntry?: boolean; privatePeek?: PublicCard[]; privatePowerPeek?: { playerId: string; layoutIndex: number; card: PublicCard }; privateSelfReveal?: (PublicCard | null)[]; error?: string };
+type GameResponse = { view?: GameView; needsEntry?: boolean; privatePeek?: PublicCard[]; privatePowerPeek?: { playerId: string; layoutIndex: number; card: PublicCard }; privateSelfReveal?: (PublicCard | null)[]; matchAttemptCancelled?: boolean; matchResult?: MatchResultEvent; error?: string };
 type RecentReplacement = { eventId: string; layoutIndex: number; card: PublicCard };
 type RecentPublicReplacement = { eventId: string; playerId: string; layoutIndex: number; card: PublicCard };
 type RecentPeek = { eventId: string; cards: PublicCard[] };
@@ -21,7 +21,7 @@ type CardSelection = { playerId: string; layoutIndex: number };
 type SwapTravel = { left: number; top: number; width: number; height: number; x: number; y: number; midpointX: number; midpointY: number; tilt: number };
 type RecentSwap = { eventId: string; cards: CardSelection[]; travel: SwapTravel[]; travelDurationMs: number };
 type MatchTravelAnimation = SwapTravel & { id: string; durationMs: number };
-type MatchResultPopup = { id: string; playerName: string; outcome: "safe" | "out"; durationMs: number };
+type MatchResultPopup = { id: string; playerName: string; outcome: MatchOutcome; durationMs: number };
 type PresenceUpdate = { playerIds: string[]; disconnectDeadlines: Record<string, number> };
 
 export default function GamePage() {
@@ -76,6 +76,28 @@ export default function GamePage() {
     return true;
   }, []);
 
+  const rememberGameEvent = useCallback((event: RealtimeGameEvent) => {
+    const eventKey = `${event.type}:${event.id}`;
+    if (handledGameEventKeys.current.has(eventKey)) return false;
+    handledGameEventKeys.current.add(eventKey);
+    if (handledGameEventKeys.current.size > 200) {
+      const oldestKey = handledGameEventKeys.current.values().next().value;
+      if (oldestKey) handledGameEventKeys.current.delete(oldestKey);
+    }
+    return true;
+  }, []);
+
+  const showMatchResult = useCallback((event: MatchResultEvent) => {
+    if (!rememberGameEvent(event)) return;
+    setMatchTravels((current) => current.filter((travel) => travel.id !== event.id));
+    if (matchResultTimer.current) window.clearTimeout(matchResultTimer.current);
+    setMatchResultPopup({ id: event.id, durationMs: event.durationMs, ...event.payload });
+    matchResultTimer.current = window.setTimeout(() => {
+      setMatchResultPopup((current) => current?.id === event.id ? undefined : current);
+      matchResultTimer.current = undefined;
+    }, event.durationMs);
+  }, [rememberGameEvent]);
+
   const sendAction = useCallback(async (action: GameAction) => {
     if (privateSelfReveal && action.type !== "match-own" && action.type !== "claim-other-match") setPrivateSelfReveal(undefined);
     const replacementCard = action.type === "replace" ? view?.game?.heldCard : undefined;
@@ -107,8 +129,9 @@ export default function GamePage() {
     if ((action.type === "match-own" || action.type === "claim-other-match") && data.privateSelfReveal) {
       setPrivateSelfReveal(data.privateSelfReveal);
     }
+    if (data.matchResult) showMatchResult(data.matchResult);
     setError("");
-  }, [applyView, inviteCode, privateSelfReveal, view?.game?.heldCard]);
+  }, [applyView, inviteCode, privateSelfReveal, showMatchResult, view?.game?.heldCard]);
 
   const leaveTable = useCallback(async () => {
     if (isLeaving.current) return;
@@ -207,16 +230,6 @@ export default function GamePage() {
       });
       animationFrames.add(frame);
     };
-    const rememberEvent = (event: RealtimeGameEvent) => {
-      const eventKey = `${event.type}:${event.id}`;
-      if (handledGameEventKeys.current.has(eventKey)) return false;
-      handledGameEventKeys.current.add(eventKey);
-      if (handledGameEventKeys.current.size > 200) {
-        const oldestKey = handledGameEventKeys.current.values().next().value;
-        if (oldestKey) handledGameEventKeys.current.delete(oldestKey);
-      }
-      return true;
-    };
     const animateSwap = (event: Extract<RealtimeGameEvent, { type: "swap:travel" }>, attempt = 0) => {
       scheduleFrame(() => {
         const elapsedMs = Math.max(0, Date.now() - event.occurredAt);
@@ -263,8 +276,6 @@ export default function GamePage() {
     };
     const animateMatch = (event: Extract<RealtimeGameEvent, { type: "match:travel" }>, attempt = 0) => {
       scheduleFrame(() => {
-        const remainingMs = event.durationMs - Math.max(0, Date.now() - event.occurredAt);
-        if (remainingMs <= 0) return;
         const source = swapCardElements.current.get(cardSlotKey({ playerId: event.payload.targetPlayerId, layoutIndex: event.payload.layoutIndex }));
         const destination = discardPileElement.current;
         if (!source || !destination) {
@@ -277,7 +288,7 @@ export default function GamePage() {
         const y = destinationRect.top + destinationRect.height / 2 - sourceRect.top - sourceRect.height / 2;
         setMatchTravels((current) => [...current.filter((travel) => travel.id !== event.id), {
           id: event.id,
-          durationMs: remainingMs,
+          durationMs: event.durationMs,
           left: sourceRect.left,
           top: sourceRect.top,
           width: sourceRect.width,
@@ -294,7 +305,7 @@ export default function GamePage() {
         gameEventTimers.current.set(eventKey, window.setTimeout(() => {
           setMatchTravels((current) => current.filter((travel) => travel.id !== event.id));
           gameEventTimers.current.delete(eventKey);
-        }, remainingMs));
+        }, event.durationMs));
       });
     };
     const watchRoom = () => {
@@ -304,15 +315,10 @@ export default function GamePage() {
     socket.on("connect", watchRoom);
     socket.on("room:update", () => void refreshGame());
     socket.on("game:event", (event: RealtimeGameEvent) => {
-      if (!rememberEvent(event)) return;
+      if (event.type === "match:result") return showMatchResult(event);
+      if (!rememberGameEvent(event)) return;
       if (event.type === "swap:travel") return animateSwap(event);
-      if (event.type === "match:travel") return animateMatch(event);
-      if (matchResultTimer.current) window.clearTimeout(matchResultTimer.current);
-      setMatchResultPopup({ id: event.id, durationMs: event.durationMs, ...event.payload });
-      matchResultTimer.current = window.setTimeout(() => {
-        setMatchResultPopup((current) => current?.id === event.id ? undefined : current);
-        matchResultTimer.current = undefined;
-      }, event.durationMs);
+      return animateMatch(event);
     });
     socket.on("presence:update", (presence: PresenceUpdate | string[]) => {
       const update = Array.isArray(presence) ? { playerIds: presence, disconnectDeadlines: {} } : presence;
@@ -323,7 +329,7 @@ export default function GamePage() {
       for (const frame of animationFrames) window.cancelAnimationFrame(frame);
       socket.disconnect();
     };
-  }, [hasJoinedTable, inviteCode, refreshGame]);
+  }, [hasJoinedTable, inviteCode, refreshGame, rememberGameEvent, showMatchResult]);
 
   useEffect(() => {
     if (Object.keys(disconnectDeadlines).length === 0) return;
@@ -551,7 +557,7 @@ export default function GamePage() {
     </>}
     {recentSwaps.flatMap((swap) => swap.travel.map((card, index) => <span aria-hidden="true" className="swap-travel-card" key={`${swap.eventId}-${index}`} style={{ left: card.left, top: card.top, width: card.width, height: card.height, "--swap-x": `${card.x}px`, "--swap-y": `${card.y}px`, "--swap-midpoint-x": `${card.midpointX}px`, "--swap-midpoint-y": `${card.midpointY}px`, "--swap-tilt": `${card.tilt}deg`, "--swap-duration": `${swap.travelDurationMs}ms` } as CSSProperties}>?</span>))}
     {matchTravels.map((card) => <span aria-hidden="true" className="match-travel-card" key={card.id} style={{ left: card.left, top: card.top, width: card.width, height: card.height, "--match-x": `${card.x}px`, "--match-y": `${card.y}px`, "--match-midpoint-x": `${card.midpointX}px`, "--match-midpoint-y": `${card.midpointY}px`, "--match-tilt": `${card.tilt}deg`, "--match-duration": `${card.durationMs}ms` } as CSSProperties}>?</span>)}
-    {matchResultPopup && <div className={`match-result-popup ${matchResultPopup.outcome}`} role="status" aria-live="assertive" key={matchResultPopup.id}><section><strong>{matchResultPopup.playerName.toUpperCase()} — {matchResultPopup.outcome.toUpperCase()}!</strong><Image unoptimized priority src={matchResultPopup.outcome === "safe" ? "/game-results/safe.gif" : "/game-results/out.gif"} width={matchResultPopup.outcome === "safe" ? 640 : 498} height={matchResultPopup.outcome === "safe" ? 374 : 281} alt={`${matchResultPopup.playerName} is ${matchResultPopup.outcome}`} /></section></div>}
+    {matchResultPopup && <div className={`match-result-popup ${matchResultPopup.outcome}`} role="status" aria-live="assertive" key={matchResultPopup.id}><section><strong>{matchResultPopup.playerName.toUpperCase()} — {matchResultPopup.outcome === "cancelled" ? "TOO SLOW" : `${matchResultPopup.outcome.toUpperCase()}!`}</strong>{matchResultPopup.outcome !== "cancelled" && <Image unoptimized priority src={matchResultPopup.outcome === "safe" ? "/game-results/safe.gif" : "/game-results/out.gif"} width={matchResultPopup.outcome === "safe" ? 640 : 498} height={matchResultPopup.outcome === "safe" ? 374 : 281} alt={`${matchResultPopup.playerName} is ${matchResultPopup.outcome}`} />}</section></div>}
     {game?.inactivityDeadline && <div className="leave-game-overlay inactivity-overlay" role="dialog" aria-modal="true" aria-labelledby="inactivity-title"><section><p>TABLE INACTIVE</p><h2 id="inactivity-title">STILL PLAYING?</h2><span>No moves have been made for a few minutes. Confirm to keep this table open.</span><strong>{inactivitySeconds}</strong><small>SECONDS REMAINING</small><button type="button" disabled={inactivitySeconds === 0} onClick={() => void sendAction({ type: "confirm-table-active" })}>KEEP TABLE OPEN</button></section></div>}
     {game?.phase === "finished" && <div className="game-over-overlay" role="dialog" aria-modal="true" aria-labelledby="game-over-title"><section><p>NINE HOLES COMPLETE</p><h2 id="game-over-title">GAME OVER</h2><strong>{finalWinners.length > 1 ? `${finalWinners.map((player) => player.name).join(" & ")} TIE` : `${finalWinners[0]?.name || "A PLAYER"} WINS`}</strong><div className="final-scores">{[...game.players].sort((first, second) => second.totalScore - first.totalScore || first.name.localeCompare(second.name)).map((player) => <span className={player.totalScore === finalWinnerScore ? "winner" : ""} key={player.id}><b>{player.name}{player.isYou ? " (YOU)" : ""}</b><em>{player.totalScore}</em></span>)}</div><small>RETURNING TO THE LOBBY IN {gameOverSeconds}S</small><button type="button" onClick={() => void leaveTable()}>RETURN TO LOBBY</button></section></div>}
     {leaveConfirmation && <div className="leave-game-overlay" role="dialog" aria-modal="true" aria-labelledby="leave-game-title"><section><p>LEAVING MID-GAME</p><h2 id="leave-game-title">LEAVE THIS GAME?</h2><span>You will be removed from the table for every player.</span><div><button type="button" className="stay-button" onClick={() => setLeaveConfirmation(false)}>STAY</button><button type="button" className="leave-button" onClick={() => void leaveTable()}>LEAVE GAME</button></div></section></div>}

@@ -1,10 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
-import { OUT_GIF_DURATION_MS, SAFE_GIF_DURATION_MS, matchTravelDuration, waitForMatchTravel } from "../../../../../lib/golf/match-race";
+import { CANCELLED_MATCH_RESULT_DURATION_MS, OUT_GIF_DURATION_MS, SAFE_GIF_DURATION_MS, matchTravelDuration, waitForMatchTravel } from "../../../../../lib/golf/match-race";
 import type { GameAction, MatchAction } from "../../../../../lib/golf/protocol";
 import { RoomError } from "../../../../../lib/rooms/registry";
 import { persistentRoomRegistry } from "../../../../../lib/rooms/sqlite-registry";
-import { publishGameEvent, publishLobbyUpdate, publishRoomUpdate } from "../../../../../lib/realtime/room-events";
+import { publishGameEvent, publishLobbyUpdate, publishRoomUpdate, type MatchOutcome, type MatchResultEvent } from "../../../../../lib/realtime/room-events";
 
 export const dynamic = "force-dynamic";
 
@@ -51,19 +51,13 @@ export async function POST(request: NextRequest, context: RouteContext) {
       });
       await waitForMatchTravel(durationMs);
       if (!registry.isMatchAttemptCurrent(inviteCode, body.playerId, body.action, attempt)) {
-        return NextResponse.json({ view: registry.gameView(inviteCode, body.playerId), matchAttemptCancelled: true });
+        const matchResult = createMatchResult(attemptId, attempt.playerName, "cancelled");
+        publishGameEvent(inviteCode, matchResult);
+        return NextResponse.json({ view: registry.gameView(inviteCode, body.playerId), matchAttemptCancelled: true, matchResult });
       }
-      result = registry.act(inviteCode, body.playerId, body.action);
-      publishGameEvent(inviteCode, {
-        id: attemptId,
-        type: "match:result",
-        occurredAt: Date.now(),
-        durationMs: attempt.correct ? SAFE_GIF_DURATION_MS : OUT_GIF_DURATION_MS,
-        payload: {
-          playerName: attempt.playerName,
-          outcome: attempt.correct ? "safe" : "out",
-        },
-      });
+      const matchResult = createMatchResult(attemptId, attempt.playerName, attempt.correct ? "safe" : "out");
+      result = { ...registry.act(inviteCode, body.playerId, body.action), matchResult };
+      publishGameEvent(inviteCode, matchResult);
     } else {
       result = registry.act(inviteCode, body.playerId, body.action);
       if (body.action.type === "use-swap-power" && body.action.first && body.action.second && result.view.game?.lastEvent?.id) {
@@ -89,6 +83,21 @@ export async function POST(request: NextRequest, context: RouteContext) {
 
 function isMatchAction(action: GameAction): action is MatchAction {
   return action.type === "match-own" || action.type === "claim-other-match";
+}
+
+function createMatchResult(id: string, playerName: string, outcome: MatchOutcome): MatchResultEvent {
+  const durationMs = outcome === "safe"
+    ? SAFE_GIF_DURATION_MS
+    : outcome === "out"
+      ? OUT_GIF_DURATION_MS
+      : CANCELLED_MATCH_RESULT_DURATION_MS;
+  return {
+    id,
+    type: "match:result",
+    occurredAt: Date.now(),
+    durationMs,
+    payload: { playerName, outcome },
+  };
 }
 
 function gameErrorResponse(error: unknown, status: number) {
