@@ -60,6 +60,21 @@ The `./data` folder is outside the container, so games survive container rebuild
 tar -czf fairway-four-backup-$(date +%F).tgz data
 ```
 
+## Chat and table cleanup
+
+The server runs cleanup on startup and every minute. Chat messages older than one hour are deleted from both clubhouse and table chat. Chat panels refresh every minute so expired messages disappear from open browsers too. Tables that have never started a game expire 30 minutes after creation, including private tables and tables with seated players. Games that have started are exempt from that age limit. Empty tables are still removed.
+
+To clear **all current tables, saved games, and chat messages** once, after pulling the updated code, run these commands from the `golf_cards` project directory on the VM:
+
+```bash
+docker compose -f docker-compose.oci.yml build fairway-four
+docker compose -f docker-compose.oci.yml stop fairway-four
+docker compose -f docker-compose.oci.yml run --rm --no-deps fairway-four npm run reset:tables-and-chat
+docker compose -f docker-compose.oci.yml up -d fairway-four
+```
+
+The reset command saves a complete SQLite backup next to the database and prints its path before deleting anything. Player profiles are preserved. If the reset fails, inspect the error before proceeding. For a local non-Docker server, stop the server, run `npm run reset:tables-and-chat`, then restart it. The command honors `FAIRWAY_FOUR_DB_PATH`; otherwise it targets `./data/fairway-four.sqlite`. This reset is manual and does not run on normal startup.
+
 ## Add HTTPS later
 
 The public-IP URL uses HTTP. For HTTPS, point a domain name at the VM's public IP and add a reverse proxy such as Caddy. Do not expose port 3000 directly; the Compose setup maps the app only to port 80.

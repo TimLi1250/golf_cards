@@ -27,7 +27,7 @@ import {
 } from "../golf/engine";
 import type { Card, LayoutCardReference, MatchAttemptSnapshot, MatchEvent, MatchState } from "../golf/engine";
 import type { GameAction, GameView, MatchAction, PublicCard } from "../golf/protocol";
-import type { ChatMessage } from "../chat";
+import { CHAT_RETENTION_MS, type ChatMessage } from "../chat";
 import { disconnectDeadline } from "../realtime/disconnect-state";
 import { PublicRoom, Room, RoomError, RoomPlayer } from "./registry";
 
@@ -131,14 +131,14 @@ export class SqliteRoomRegistry {
   }
 
   lobbyChat(): ChatMessage[] {
-    const rows = this.database.prepare("SELECT * FROM chat_messages WHERE channel = 'lobby' ORDER BY sent_at DESC LIMIT 100").all() as unknown as ChatMessageRow[];
+    const rows = this.database.prepare("SELECT * FROM chat_messages WHERE channel = 'lobby' AND sent_at >= ? ORDER BY sent_at DESC LIMIT 100").all(Date.now() - CHAT_RETENTION_MS) as unknown as ChatMessageRow[];
     return rows.reverse().map((row) => this.mapChatMessage(row));
   }
 
   roomChat(inviteCode: string, playerId: string): ChatMessage[] {
     const room = this.requireRoom(inviteCode);
     this.requireRoomPlayer(room.id, playerId);
-    const rows = this.database.prepare("SELECT * FROM chat_messages WHERE channel = 'room' AND room_id = ? ORDER BY sent_at DESC LIMIT 100").all(room.id) as unknown as ChatMessageRow[];
+    const rows = this.database.prepare("SELECT * FROM chat_messages WHERE channel = 'room' AND room_id = ? AND sent_at >= ? ORDER BY sent_at DESC LIMIT 100").all(room.id, Date.now() - CHAT_RETENTION_MS) as unknown as ChatMessageRow[];
     return rows.reverse().map((row) => this.mapChatMessage(row, room.invite_code));
   }
 
@@ -258,6 +258,25 @@ export class SqliteRoomRegistry {
     if (!room) return false;
     this.database.prepare("DELETE FROM rooms WHERE id = ?").run(room.id);
     return true;
+  }
+
+  sweepExpiredData(now = Date.now()): { deletedMessages: number; removedInviteCodes: string[] } {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const messages = this.database.prepare("DELETE FROM chat_messages WHERE sent_at < ?").run(now - CHAT_RETENTION_MS);
+      // A started game's age must never qualify it for the unstarted-table timeout.
+      const rooms = this.database.prepare(`
+        DELETE FROM rooms WHERE
+          (status = 'lobby' AND created_at <= ? AND NOT EXISTS (SELECT 1 FROM room_games WHERE room_id = rooms.id))
+          OR NOT EXISTS (SELECT 1 FROM room_players WHERE room_id = rooms.id)
+        RETURNING invite_code
+      `).all(new Date(now - 30 * 60_000).toISOString()) as unknown as { invite_code: string }[];
+      this.database.exec("COMMIT");
+      return { deletedMessages: Number(messages.changes), removedInviteCodes: rooms.map((room) => room.invite_code) };
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   sweepInactiveTables(now = Date.now(), inactiveAfterMs = 3 * 60_000, warningMs = 30_000): { warnedInviteCodes: string[]; removedInviteCodes: string[] } {

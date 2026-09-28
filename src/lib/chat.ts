@@ -1,3 +1,5 @@
+export const CHAT_RETENTION_MS = 60 * 60_000;
+
 export type ChatChannel = "lobby" | "room";
 
 export type ChatMessage = {

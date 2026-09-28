@@ -27,7 +27,7 @@ export default function ChatPanel({ channel, inviteCode, playerId, playerName, c
   useEffect(() => {
     const controller = new AbortController();
     const endpoint = channel === "lobby" ? "/api/chat/lobby" : `/api/rooms/${normalizedInviteCode}/chat?playerId=${encodeURIComponent(playerId)}`;
-    void fetch(endpoint, { cache: "no-store", signal: controller.signal })
+    const loadMessages = () => fetch(endpoint, { cache: "no-store", signal: controller.signal })
       .then(async (response) => ({ response, data: await response.json() as { messages?: ChatMessage[]; error?: string } }))
       .then(({ response, data }) => {
         if (!response.ok) return setError(data.error || "Unable to load chat.");
@@ -37,7 +37,13 @@ export default function ChatPanel({ channel, inviteCode, playerId, playerName, c
         if (reason instanceof DOMException && reason.name === "AbortError") return;
         setError("Unable to load chat.");
       });
-    return () => controller.abort();
+    void loadMessages();
+    // Refresh even quiet chats so expired or cleared messages disappear.
+    const refresh = window.setInterval(() => void loadMessages(), 60_000);
+    return () => {
+      controller.abort();
+      window.clearInterval(refresh);
+    };
   }, [channel, normalizedInviteCode, playerId]);
 
   useEffect(() => {

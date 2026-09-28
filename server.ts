@@ -99,19 +99,20 @@ async function bootstrap() {
   roomEvents.on("presence:update", (inviteCode: string, playerIds: string[]) => io.to(`room:${inviteCode}`).emit("presence:update", playerIds));
   roomEvents.on("chat:lobby", (message) => io.to("lobby").emit("chat:message", { channel: "lobby", message }));
   roomEvents.on("chat:room", (inviteCode: string, message) => io.to(`room:${inviteCode}`).emit("chat:message", { channel: "room", inviteCode, message }));
-  const emptyTableSweep = setInterval(() => {
-    const registry = persistentRoomRegistry();
-    // WebSocket connections can briefly disappear while a mobile app is
-    // backgrounded or reconnecting. Only remove tables after the persistent
-    // player list is genuinely empty, never merely because a socket is gone.
-    const removedInviteCodes = registry.inviteCodes()
-      .filter((inviteCode) => registry.get(inviteCode).players.length === 0)
-      .filter((inviteCode) => registry.removeRoom(inviteCode));
-    if (removedInviteCodes.length === 0) return;
-    publishLobbyUpdate();
-    for (const inviteCode of removedInviteCodes) publishRoomUpdate(inviteCode);
-  }, 60_000);
-  emptyTableSweep.unref();
+  const sweepExpiredData = () => {
+    try {
+      const { removedInviteCodes } = persistentRoomRegistry().sweepExpiredData();
+      if (removedInviteCodes.length === 0) return;
+      publishLobbyUpdate();
+      for (const inviteCode of removedInviteCodes) publishRoomUpdate(inviteCode);
+      broadcastLobbyPresence(io);
+    } catch (error) {
+      console.error("Unable to clean up expired chat and tables:", error);
+    }
+  };
+  sweepExpiredData();
+  const expirySweep = setInterval(sweepExpiredData, 60_000);
+  expirySweep.unref();
 
   httpServer.listen(port, () => {
     console.log(`> Ready on http://localhost:${port}`);

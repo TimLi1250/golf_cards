@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "NODE_ENV=production tsx server.ts",
     "lint": "eslint .",
-    "test": "tsx --test"
+    "test": "tsx --test",
+    "reset:tables-and-chat": "node --import tsx scripts/reset-tables-and-chat.ts"
   },
   "dependencies": {
     "next": "latest",

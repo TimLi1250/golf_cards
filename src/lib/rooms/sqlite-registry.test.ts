@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { SqliteRoomRegistry } from "./sqlite-registry";
 
@@ -64,6 +66,123 @@ test("stores chat history and keeps table chat private to seated players", () =>
     assert.equal(registry.roomChat(room.inviteCode, "player-b")[0].id, roomMessage.id);
     assert.throws(() => registry.roomChat(room.inviteCode, "player-c"));
     assert.throws(() => registry.postRoomChat(room.inviteCode, { playerId: "player-c", body: "Let me in" }));
+  } finally {
+    registry.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("expires both chat channels after one hour, including chats with no new messages", (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "fairway-four-chat-expiry-"));
+  const databasePath = join(directory, "rooms.sqlite");
+  const registry = new SqliteRoomRegistry(databasePath);
+  const database = new DatabaseSync(databasePath);
+  const now = Date.now();
+  t.mock.method(Date, "now", () => now);
+  try {
+    const room = registry.create({ host: "Avery", hostId: "player-a", playerLimit: 2 });
+    const oldLobby = registry.postLobbyChat({ playerId: "player-a", playerName: "Avery", body: "Old lobby" });
+    const oldRoom = registry.postRoomChat(room.inviteCode, { playerId: "player-a", body: "Old room" });
+    database.prepare("UPDATE chat_messages SET sent_at = ?").run(now - 60 * 60_000 - 1);
+    const boundaryLobby = registry.postLobbyChat({ playerId: "player-a", playerName: "Avery", body: "Boundary lobby" });
+    const boundaryRoom = registry.postRoomChat(room.inviteCode, { playerId: "player-a", body: "Boundary room" });
+    database.prepare("UPDATE chat_messages SET sent_at = ? WHERE id IN (?, ?)").run(now - 60 * 60_000, boundaryLobby.id, boundaryRoom.id);
+    const freshLobby = registry.postLobbyChat({ playerId: "player-a", playerName: "Avery", body: "Fresh lobby" });
+    const freshRoom = registry.postRoomChat(room.inviteCode, { playerId: "player-a", body: "Fresh room" });
+
+    // Reads must hide expired messages even before the next cleanup sweep.
+    assert.deepEqual(registry.lobbyChat().map((message) => message.id), [boundaryLobby.id, freshLobby.id]);
+    assert.deepEqual(registry.roomChat(room.inviteCode, "player-a").map((message) => message.id), [boundaryRoom.id, freshRoom.id]);
+    assert.deepEqual(registry.sweepExpiredData(now), { deletedMessages: 2, removedInviteCodes: [] });
+    assert.equal(database.prepare("SELECT 1 FROM chat_messages WHERE id IN (?, ?)").get(oldLobby.id, oldRoom.id), undefined);
+    assert.equal(registry.sweepExpiredData(now + 1).deletedMessages, 2);
+    assert.deepEqual(registry.lobbyChat().map((message) => message.id), [freshLobby.id]);
+    assert.deepEqual(registry.roomChat(room.inviteCode, "player-a").map((message) => message.id), [freshRoom.id]);
+  } finally {
+    database.close();
+    registry.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("sweeps unstarted tables at 30 minutes and empty tables, preserving games that started", () => {
+  const directory = mkdtempSync(join(tmpdir(), "fairway-four-table-expiry-"));
+  const databasePath = join(directory, "rooms.sqlite");
+  const registry = new SqliteRoomRegistry(databasePath);
+  const database = new DatabaseSync(databasePath);
+  const now = Date.now();
+  try {
+    const expired = registry.create({ host: "Avery", hostId: "player-a", playerLimit: 2 });
+    const privateExpired = registry.create({ host: "Avery", hostId: "player-a", playerLimit: 2, isPrivate: true });
+    const young = registry.create({ host: "Avery", hostId: "player-a", playerLimit: 2 });
+    const playing = registry.create({ host: "Avery", hostId: "player-a", playerLimit: 2 });
+    const finished = registry.create({ host: "Avery", hostId: "player-a", playerLimit: 2 });
+    const empty = registry.create({ host: "Avery", hostId: "player-a", playerLimit: 2 });
+    database.prepare("UPDATE rooms SET created_at = ?").run(new Date(now - 30 * 60_000).toISOString());
+    database.prepare("UPDATE rooms SET created_at = ? WHERE id IN (?, ?)").run(new Date(now - 30 * 60_000 + 1).toISOString(), young.id, empty.id);
+    registry.postRoomChat(expired.inviteCode, { playerId: "player-a", body: "Remove with table" });
+    const lobbyMessage = registry.postLobbyChat({ playerId: "player-a", playerName: "Avery", body: "Keep lobby chat" });
+    for (const room of [playing, finished]) {
+      registry.join(room.inviteCode, { playerId: "player-b", playerName: "Blake" });
+      registry.startGame(room.inviteCode, "player-a");
+    }
+    database.prepare("UPDATE rooms SET status = 'finished' WHERE id = ?").run(finished.id);
+    registry.leave(empty.inviteCode, "player-a");
+
+    const result = registry.sweepExpiredData(now);
+    assert.deepEqual(result.removedInviteCodes.sort(), [expired.inviteCode, privateExpired.inviteCode, empty.inviteCode].sort());
+    assert.throws(() => registry.get(expired.inviteCode), /No open table/);
+    assert.throws(() => registry.startGame(expired.inviteCode, "player-a"), /No open table/);
+    assert.equal(database.prepare("SELECT 1 FROM room_players WHERE room_id = ?").get(expired.id), undefined);
+    assert.equal(database.prepare("SELECT 1 FROM chat_messages WHERE room_id = ?").get(expired.id), undefined);
+    assert.equal(registry.lobbyChat()[0].id, lobbyMessage.id);
+    assert.equal(registry.get(young.inviteCode).status, "lobby");
+    assert.equal(registry.get(playing.inviteCode).status, "playing");
+    assert.equal(registry.get(finished.inviteCode).status, "finished");
+    assert.deepEqual(registry.sweepExpiredData(now + 1).removedInviteCodes, [young.inviteCode]);
+    assert.deepEqual(registry.sweepExpiredData(now + 60 * 60_000).removedInviteCodes, []);
+    assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+  } finally {
+    database.close();
+    registry.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("the manual reset backs up chat and games, clears all tables, and preserves player profiles", () => {
+  const directory = mkdtempSync(join(tmpdir(), "fairway-four-reset-"));
+  const databasePath = join(directory, "rooms.sqlite");
+  const registry = new SqliteRoomRegistry(databasePath);
+  try {
+    const room = registry.create({ host: "Avery", hostId: "player-a", playerLimit: 2 });
+    registry.join(room.inviteCode, { playerId: "player-b", playerName: "Blake" });
+    registry.startGame(room.inviteCode, "player-a");
+    registry.postRoomChat(room.inviteCode, { playerId: "player-a", body: "Table message" });
+    registry.postLobbyChat({ playerId: "player-a", playerName: "Avery", body: "Lobby message" });
+    const result = spawnSync(process.execPath, ["--import", "tsx", fileURLToPath(new URL("../../../scripts/reset-tables-and-chat.ts", import.meta.url))], {
+      env: { ...process.env, FAIRWAY_FOUR_DB_PATH: databasePath },
+      encoding: "utf8",
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /Cleared 1 tables and 2 chat messages/);
+    assert.deepEqual(registry.inviteCodes(), []);
+    assert.deepEqual(registry.lobbyChat(), []);
+    assert.equal(registry.knownPlayers().length, 2);
+    const database = new DatabaseSync(databasePath);
+    const backupName = readdirSync(directory).find((name) => name.includes(".before-reset-"))!;
+    const backup = new DatabaseSync(join(directory, backupName), { readOnly: true });
+    try {
+      assert.equal(database.prepare("SELECT 1 FROM room_games").get(), undefined);
+      assert.equal(database.prepare("SELECT 1 FROM room_players").get(), undefined);
+      assert.equal(database.prepare("SELECT 1 FROM chat_messages").get(), undefined);
+      assert.ok(backup.prepare("SELECT 1 FROM rooms WHERE id = ?").get(room.id));
+      assert.ok(backup.prepare("SELECT 1 FROM room_games WHERE room_id = ?").get(room.id));
+      assert.equal((backup.prepare("SELECT COUNT(*) AS count FROM chat_messages").get() as { count: number }).count, 2);
+      assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+    } finally {
+      backup.close();
+      database.close();
+    }
   } finally {
     registry.close();
     rmSync(directory, { recursive: true, force: true });
